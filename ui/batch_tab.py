@@ -14,6 +14,7 @@ class TimelineDialog(QDialog):
         self.batch_id = batch_id
         self.service = service
         self.device_no = device_no
+        self.is_batch_view = not device_no
 
         if device_no:
             self.setWindowTitle(f"设备全链路追踪 - {device_no}")
@@ -21,21 +22,51 @@ class TimelineDialog(QDialog):
             batch = service.get_batch_by_id(batch_id)
             self.setWindowTitle(f"批次全链路追踪 - {batch['batch_no'] if batch else ''}")
 
-        self.setMinimumSize(1000, 750)
+        self.setMinimumSize(1050, 780)
         self.init_ui()
         self.load_timeline()
 
     def init_ui(self):
         layout = QVBoxLayout(self)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll_content = QWidget()
-        self.timeline_layout = QVBoxLayout(scroll_content)
-        self.timeline_layout.setSpacing(12)
-        self.timeline_layout.setContentsMargins(20, 20, 20, 20)
-        scroll.setWidget(scroll_content)
-        layout.addWidget(scroll, 1)
+        if self.is_batch_view:
+            self.content_tabs = QTabWidget()
+
+            timeline_page = QWidget()
+            timeline_layout = QVBoxLayout(timeline_page)
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll_content = QWidget()
+            self.timeline_layout = QVBoxLayout(scroll_content)
+            self.timeline_layout.setSpacing(12)
+            self.timeline_layout.setContentsMargins(20, 20, 20, 20)
+            scroll.setWidget(scroll_content)
+            timeline_layout.addWidget(scroll, 1)
+            self.content_tabs.addTab(timeline_page, "⏱️ 全链路时间线")
+
+            active_page = QWidget()
+            active_layout = QVBoxLayout(active_page)
+            active_layout.addWidget(QLabel("<b>🔴 当前进行中的租借（未归还设备）</b>"))
+            self.active_table = QTableWidget()
+            self.active_table.setColumnCount(6)
+            self.active_table.setHorizontalHeaderLabels([
+                "设备编号", "借出网点", "网点类型", "借出时间", "已借出(分)", "订单号"
+            ])
+            self.active_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+            self.active_table.setEditTriggers(QTableWidget.NoEditTriggers)
+            active_layout.addWidget(self.active_table, 1)
+            self.content_tabs.addTab(active_page, "🔴 进行中租借")
+
+            layout.addWidget(self.content_tabs, 1)
+        else:
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll_content = QWidget()
+            self.timeline_layout = QVBoxLayout(scroll_content)
+            self.timeline_layout.setSpacing(12)
+            self.timeline_layout.setContentsMargins(20, 20, 20, 20)
+            scroll.setWidget(scroll_content)
+            layout.addWidget(scroll, 1)
 
         stats_layout = QHBoxLayout()
         self.stats_label = QLabel("")
@@ -145,7 +176,27 @@ class TimelineDialog(QDialog):
         stats_parts = []
         for t, c in type_stats.items():
             stats_parts.append(f"{t}: {c}次")
-        self.stats_label.setText(f"共 {len(events)} 条事件 | " + " | ".join(stats_parts))
+        stats_text = f"共 {len(events)} 条事件 | " + " | ".join(stats_parts)
+
+        if self.is_batch_view:
+            from datetime import datetime as _dt
+            actives = self.service.get_batch_active_rentals(self.batch_id)
+            self.active_table.setRowCount(len(actives))
+            for row, a in enumerate(actives):
+                self.active_table.setItem(row, 0, QTableWidgetItem(a.get('device_no', '')))
+                self.active_table.setItem(row, 1, QTableWidgetItem(a.get('outlet_name', '')))
+                self.active_table.setItem(row, 2, QTableWidgetItem(a.get('location_type') or '-'))
+                self.active_table.setItem(row, 3, QTableWidgetItem(a.get('borrow_time', '')))
+                try:
+                    bt = _dt.strptime(a['borrow_time'], '%Y-%m-%d %H:%M:%S')
+                    elapsed = int((_dt.now() - bt).total_seconds() / 60)
+                except:
+                    elapsed = 0
+                self.active_table.setItem(row, 4, QTableWidgetItem(str(elapsed)))
+                self.active_table.setItem(row, 5, QTableWidgetItem(a.get('order_no', '')))
+            stats_text += f" | 🔴 未归还: {len(actives)}台"
+
+        self.stats_label.setText(stats_text)
 
 
 class BatchDialog(QDialog):

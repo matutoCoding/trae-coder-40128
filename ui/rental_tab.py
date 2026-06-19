@@ -1,9 +1,11 @@
+import csv
+import os
 from datetime import datetime, timedelta
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
                              QPushButton, QDialog, QFormLayout, QLineEdit, QSpinBox,
                              QMessageBox, QHeaderView, QLabel, QGroupBox,
                              QDialogButtonBox, QDateEdit, QComboBox, QTabWidget,
-                             QDoubleSpinBox, QTextEdit)
+                             QDoubleSpinBox, QTextEdit, QFileDialog)
 from PyQt5.QtCore import Qt, QDate
 from services.rental_service import RentalService
 from services.batch_service import BatchService
@@ -258,6 +260,12 @@ class RentalTab(QWidget):
         self.view_outlet_orders_btn = QPushButton("📋 查看网点订单明细")
         self.view_outlet_orders_btn.clicked.connect(self.view_outlet_order_detail)
         report_filter_layout.addWidget(self.view_outlet_orders_btn)
+        self.export_summary_btn = QPushButton("📤 导出网点汇总CSV")
+        self.export_summary_btn.clicked.connect(self.export_report_summary_csv)
+        report_filter_layout.addWidget(self.export_summary_btn)
+        self.export_orders_btn = QPushButton("📤 导出订单明细CSV")
+        self.export_orders_btn.clicked.connect(self.export_report_orders_csv)
+        report_filter_layout.addWidget(self.export_orders_btn)
         report_filter_layout.addStretch()
         report_layout.addLayout(report_filter_layout)
 
@@ -775,3 +783,117 @@ class RentalTab(QWidget):
             dialog.exec_()
         except Exception as e:
             QMessageBox.critical(self, "错误", f"查询失败: {str(e)}")
+
+    def _get_report_filter(self):
+        start_date = self.report_start_date.date().toString("yyyy-MM-dd")
+        end_date = self.report_end_date.date().toString("yyyy-MM-dd")
+        return start_date, end_date
+
+    def export_report_summary_csv(self):
+        start_date, end_date = self._get_report_filter()
+        try:
+            report_data = self.rental_service.get_revenue_report_by_outlet(start_date, end_date)
+            if not report_data:
+                QMessageBox.warning(self, "提示", "当前筛选条件下没有数据可导出，请先生成报表")
+                return
+
+            default_name = f"营收报表_网点汇总_{start_date}_{end_date}.csv"
+            save_path, _ = QFileDialog.getSaveFileName(
+                self, "导出网点汇总CSV", default_name, "CSV文件 (*.csv)"
+            )
+            if not save_path:
+                return
+
+            with open(save_path, 'w', newline='', encoding='utf-8-sig') as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    "网点ID", "网点名称", "网点类型", "订单数", "已完成订单",
+                    "进行中订单", "营收(元)", "平均金额(元)", "平均时长(分)"
+                ])
+                total_rev = 0
+                total_orders = 0
+                for row in report_data:
+                    writer.writerow([
+                        row.get('outlet_id', ''),
+                        row.get('outlet_name', ''),
+                        row.get('location_type', ''),
+                        row.get('order_count', 0),
+                        row.get('completed_count', 0),
+                        row.get('active_count', 0),
+                        f"{row.get('total_revenue', 0):.2f}",
+                        f"{row.get('avg_amount', 0):.2f}",
+                        f"{row.get('avg_duration', 0):.0f}"
+                    ])
+                    total_rev += row.get('total_revenue', 0) or 0
+                    total_orders += row.get('order_count', 0) or 0
+                writer.writerow([])
+                writer.writerow(["合计", "", "", total_orders, "", "", f"{total_rev:.2f}", "", ""])
+
+            QMessageBox.information(self, "成功",
+                f"导出成功!\n文件: {save_path}\n"
+                f"网点数: {len(report_data)} | 总订单: {total_orders} | 总营收: {total_rev:.2f}元")
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"导出失败: {str(e)}")
+
+    def export_report_orders_csv(self):
+        start_date, end_date = self._get_report_filter()
+        try:
+            summary = self.rental_service.get_revenue_report_by_outlet(start_date, end_date)
+            if not summary:
+                QMessageBox.warning(self, "提示", "当前筛选条件下没有数据可导出，请先生成报表")
+                return
+
+            default_name = f"营收报表_订单明细_{start_date}_{end_date}.csv"
+            save_path, _ = QFileDialog.getSaveFileName(
+                self, "导出订单明细CSV", default_name, "CSV文件 (*.csv)"
+            )
+            if not save_path:
+                return
+
+            all_orders = []
+            for outlet_row in summary:
+                outlet_id = outlet_row.get('outlet_id')
+                if outlet_id:
+                    orders = self.rental_service.get_outlet_orders_detail(outlet_id, start_date, end_date)
+                    all_orders.extend(orders)
+
+            with open(save_path, 'w', newline='', encoding='utf-8-sig') as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    "订单号", "设备编号", "网点名称", "计费规则",
+                    "借出时间", "归还时间", "时长(分)", "计算金额(元)",
+                    "实收金额(元)", "封顶天数", "状态"
+                ])
+                total_amount = 0
+                for order in all_orders:
+                    duration = order.get('duration_minutes') or 0
+                    days = (duration - 1) // 1440 + 1 if duration > 0 else 0
+                    calc = order.get('calculated_amount')
+                    if calc is None:
+                        calc = order.get('final_amount', 0) or 0
+                    final = order.get('final_amount', 0) or 0
+                    total_amount += final
+                    status = '进行中' if order.get('status') == 'active' else '已完成'
+                    writer.writerow([
+                        order.get('order_no', ''),
+                        order.get('device_no', ''),
+                        order.get('outlet_name', ''),
+                        order.get('rule_name', ''),
+                        order.get('borrow_time', ''),
+                        order.get('return_time', ''),
+                        duration,
+                        f"{calc:.2f}",
+                        f"{final:.2f}",
+                        f"{days}天" if days > 0 else '-',
+                        status
+                    ])
+                writer.writerow([])
+                writer.writerow(["合计", "", f"{len(all_orders)}单", "", "", "", "", "", f"{total_amount:.2f}", "", ""])
+
+            page_rev = sum(r.get('total_revenue', 0) or 0 for r in summary)
+            QMessageBox.information(self, "成功",
+                f"导出成功!\n文件: {save_path}\n"
+                f"订单数: {len(all_orders)}笔 | 导出总营收: {total_amount:.2f}元\n"
+                f"页面显示营收: {page_rev:.2f}元 | 核对: {'✅一致' if abs(total_amount - page_rev) < 0.01 else '⚠️存在差异'}")
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"导出失败: {str(e)}")

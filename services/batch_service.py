@@ -208,26 +208,42 @@ class BatchService:
             ''', (ob['id'],))
 
             for device in devices:
-                if device.get('last_borrow_time'):
+                if device.get('last_borrow_time') or device.get('status') in ('in_use', 'deployed'):
                     orders = self.db.query('''
                         SELECT ro.*, o.name as outlet_name
                         FROM rental_orders ro
                         JOIN outlets o ON ro.outlet_id = o.id
-                        WHERE ro.device_id = ? AND ro.status = 'completed'
+                        WHERE ro.device_id = ?
                         ORDER BY ro.borrow_time
                     ''', (device['id'],))
 
                     for order in orders:
-                        duration = f'{order["duration_minutes"]}分钟' if order.get('duration_minutes') else '未归还'
-                        amount = f'{order["final_amount"]:.2f}元' if order.get('final_amount') is not None else '计费中'
-                        events.append({
-                            'type': '租借',
-                            'icon': '🔋',
-                            'time': order['borrow_time'],
-                            'title': f'设备{device["device_no"]}被租借',
-                            'description': f'{order.get("outlet_name","")}网点借出，时长{duration}，收费{amount}',
-                            'device_range': device['device_no']
-                        })
+                        if order['status'] == 'active':
+                            events.append({
+                                'type': '租借',
+                                'icon': '🔴',
+                                'time': order['borrow_time'],
+                                'title': f'设备{device["device_no"]}租借进行中',
+                                'description': f'⏳ 在借中：{order.get("outlet_name","")}网点借出，暂未归还',
+                                'device_range': device['device_no'],
+                                'is_active': True
+                            })
+                        else:
+                            duration = f'{order["duration_minutes"]}分钟' if order.get('duration_minutes') else '未归还'
+                            amount = f'{order["final_amount"]:.2f}元' if order.get('final_amount') is not None else '计费中'
+                            days = 0
+                            if order.get('duration_minutes') and order.get('duration_minutes') > 0:
+                                days = (order['duration_minutes'] - 1) // 1440 + 1
+                            cap_info = f"（封顶{days}天）" if days > 1 else ""
+                            events.append({
+                                'type': '租借',
+                                'icon': '🔋',
+                                'time': order['borrow_time'],
+                                'title': f'设备{device["device_no"]}租借已完成',
+                                'description': f'{order.get("outlet_name","")}网点借出，时长{duration}，收费{amount}{cap_info}，归还于{order.get("return_time","")}',
+                                'device_range': device['device_no'],
+                                'is_active': False
+                            })
 
                 maintenance = self.db.query('''
                     SELECT dm.* FROM device_maintenance dm
@@ -249,6 +265,19 @@ class BatchService:
 
         events.sort(key=lambda x: x['time'])
         return events
+
+    def get_batch_active_rentals(self, batch_id):
+        return self.db.query('''
+            SELECT ro.*,
+                   d.device_no,
+                   o.name as outlet_name,
+                   o.location_type
+            FROM rental_orders ro
+            JOIN devices d ON ro.device_id = d.id
+            JOIN outlets o ON ro.outlet_id = o.id
+            WHERE d.batch_id = ? AND ro.status = 'active'
+            ORDER BY ro.borrow_time DESC
+        ''', (batch_id,))
 
     def get_device_full_timeline(self, device_no):
         events = []

@@ -122,29 +122,34 @@ class PlanDialog(QDialog):
             QMessageBox.warning(self, "警告", "请输入计划名称")
             return
         total = sum(spin.value() for spin in self.outlet_spins.values())
+        target = self.target_total_spin.value()
         if total <= 0:
             QMessageBox.warning(self, "警告", "请至少分配一个网点的目标数量")
             return
+        if total > target:
+            QMessageBox.warning(self, "警告",
+                f"网点分配总数({total}台)超过计划总目标({target}台)，请调整分配数量")
+            return
+        if total < target:
+            reply = QMessageBox.question(self, "确认",
+                f"网点分配总数({total}台)小于计划总目标({target}台)，\n"
+                f"将以实际分配的{total}台作为最终目标。是否继续保存？",
+                QMessageBox.Yes | QMessageBox.No)
+            if reply != QMessageBox.Yes:
+                return
         self.accept()
 
     def get_data(self):
         outlet_targets = [(outlet_id, spin.value())
                          for outlet_id, spin in self.outlet_spins.items() if spin.value() > 0]
-        auto_targets = []
         target_total = self.target_total_spin.value()
         allocated = sum(q for _, q in outlet_targets)
-        if allocated < target_total and outlet_targets:
-            remaining = target_total - allocated
-            avg_remaining = remaining // len(outlet_targets)
-            remainder = remaining % len(outlet_targets)
-            for i in range(len(outlet_targets)):
-                add = avg_remaining + (1 if i < remainder else 0)
-                outlet_targets[i] = (outlet_targets[i][0], outlet_targets[i][1] + add)
+        final_target = min(allocated, target_total) if allocated > 0 else target_total
 
         return {
             'plan_name': self.name_edit.text().strip(),
             'location_type': self.location_type_combo.currentData(),
-            'target_quantity': self.target_total_spin.value(),
+            'target_quantity': final_target,
             'outlet_targets': outlet_targets,
             'priority': self.priority_combo.currentData(),
             'plan_date': self.plan_date_edit.date().toString("yyyy-MM-dd"),
@@ -505,6 +510,8 @@ class OutboundTab(QWidget):
             self.stats_table.setItem(row, 1, QTableWidgetItem(str(stat['outlet_count'])))
             self.stats_table.setItem(row, 2, QTableWidgetItem(str(stat['device_count'])))
             self.stats_table.setItem(row, 3, QTableWidgetItem(str(stat['in_use'])))
+
+        self.load_plans()
 
     def load_outlet_devices(self):
         current_row = self.outlet_table.currentRow()

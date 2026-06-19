@@ -245,6 +245,31 @@ class OutboundService:
                 WHERE id = ?
             ''', (new_remaining, now, batch['id']))
 
+            plan_id = outbound['plan_id'] if 'plan_id' in outbound.keys() else None
+            plan_outlet_id = outbound['plan_outlet_id'] if 'plan_outlet_id' in outbound.keys() else None
+            if plan_id and plan_outlet_id:
+                cursor.execute("SELECT * FROM plan_outlets WHERE id = ?", (plan_outlet_id,))
+                po = cursor.fetchone()
+                if po:
+                    new_completed = max(0, po['completed_quantity'] - outbound['quantity'])
+                    cursor.execute('''
+                        UPDATE plan_outlets SET completed_quantity = ? WHERE id = ?
+                    ''', (new_completed, plan_outlet_id))
+
+                cursor.execute('''
+                    UPDATE deployment_plans 
+                    SET completed_quantity = (
+                        SELECT COALESCE(SUM(completed_quantity), 0) FROM plan_outlets WHERE plan_id = ?
+                    ),
+                    status = CASE 
+                        WHEN (SELECT COALESCE(SUM(completed_quantity), 0) FROM plan_outlets WHERE plan_id = ?) >= target_quantity THEN 'completed'
+                        WHEN (SELECT COALESCE(SUM(completed_quantity), 0) FROM plan_outlets WHERE plan_id = ?) > 0 THEN 'in_progress'
+                        ELSE 'pending'
+                    END,
+                    updated_at = ?
+                    WHERE id = ?
+                ''', (plan_id, plan_id, plan_id, now, plan_id))
+
             cursor.execute("DELETE FROM split_outbound WHERE id = ?", (outbound_id,))
 
             conn.commit()

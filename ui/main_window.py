@@ -6,6 +6,7 @@ from ui.billing_tab import BillingTab
 from ui.batch_tab import BatchTab
 from ui.outbound_tab import OutboundTab
 from ui.rental_tab import RentalTab
+from ui.dashboard_tab import DashboardTab
 
 
 class MainWindow(QMainWindow):
@@ -62,11 +63,13 @@ class MainWindow(QMainWindow):
             }
         """)
 
+        self.dashboard_tab = DashboardTab(self.db)
         self.billing_tab = BillingTab(self.db)
         self.batch_tab = BatchTab(self.db)
         self.outbound_tab = OutboundTab(self.db)
         self.rental_tab = RentalTab(self.db)
 
+        self.tab_widget.addTab(self.dashboard_tab, "📈 运营看板")
         self.tab_widget.addTab(self.billing_tab, "💰 计费规则")
         self.tab_widget.addTab(self.batch_tab, "📦 设备批次")
         self.tab_widget.addTab(self.outbound_tab, "🚚 拆分出库")
@@ -110,15 +113,18 @@ class MainWindow(QMainWindow):
 
     def on_tab_changed(self, index):
         if index == 0:
-            self.billing_tab.load_data()
+            self.dashboard_tab.load_data()
         elif index == 1:
-            self.batch_tab.load_data()
+            self.billing_tab.load_data()
         elif index == 2:
-            self.outbound_tab.load_data()
+            self.batch_tab.load_data()
         elif index == 3:
+            self.outbound_tab.load_data()
+        elif index == 4:
             self.rental_tab.load_data()
 
     def refresh_all(self):
+        self.dashboard_tab.load_data()
         self.billing_tab.load_data()
         self.batch_tab.load_data()
         self.outbound_tab.load_data()
