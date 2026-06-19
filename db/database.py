@@ -195,10 +195,16 @@ class Database:
                 outlet_id INTEGER NOT NULL,
                 target_quantity INTEGER NOT NULL,
                 completed_quantity INTEGER NOT NULL DEFAULT 0,
+                task_type TEXT NOT NULL DEFAULT 'restock',
                 FOREIGN KEY (plan_id) REFERENCES deployment_plans(id),
                 FOREIGN KEY (outlet_id) REFERENCES outlets(id)
             )
         ''')
+
+        try:
+            cursor.execute("ALTER TABLE plan_outlets ADD COLUMN task_type TEXT NOT NULL DEFAULT 'restock'")
+        except sqlite3.OperationalError:
+            pass
 
         try:
             cursor.execute("ALTER TABLE split_outbound ADD COLUMN plan_id INTEGER REFERENCES deployment_plans(id)")
@@ -207,6 +213,11 @@ class Database:
 
         try:
             cursor.execute("ALTER TABLE split_outbound ADD COLUMN plan_outlet_id INTEGER REFERENCES plan_outlets(id)")
+        except sqlite3.OperationalError:
+            pass
+
+        try:
+            cursor.execute("ALTER TABLE split_outbound ADD COLUMN task_type TEXT NOT NULL DEFAULT 'restock'")
         except sqlite3.OperationalError:
             pass
 

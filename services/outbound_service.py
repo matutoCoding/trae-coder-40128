@@ -49,7 +49,7 @@ class OutboundService:
 
         return outbound
 
-    def split_outbound(self, batch_id, quantity, outlet_id, operator=None, outbound_date=None, remark=None):
+    def split_outbound(self, batch_id, quantity, outlet_id, operator=None, outbound_date=None, remark=None, task_type='restock'):
         if outbound_date is None:
             outbound_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
@@ -80,9 +80,9 @@ class OutboundService:
 
             cursor.execute('''
                 INSERT INTO split_outbound 
-                (batch_id, outbound_no, quantity, outlet_id, operator, outbound_date, remark, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (batch_id, outbound_no, quantity, outlet_id, operator, outbound_date, remark, now))
+                (batch_id, outbound_no, quantity, outlet_id, operator, outbound_date, remark, created_at, task_type)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (batch_id, outbound_no, quantity, outlet_id, operator, outbound_date, remark, now, task_type))
 
             outbound_id = cursor.lastrowid
 

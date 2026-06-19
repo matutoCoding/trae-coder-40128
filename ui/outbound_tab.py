@@ -151,10 +151,10 @@ class PlanDialog(QDialog):
         self.accept()
 
     def get_data(self):
-        outlet_targets = [(outlet_id, spin.value())
+        outlet_targets = [(outlet_id, spin.value(), 'restock')
                          for outlet_id, spin in self.outlet_spins.items() if spin.value() > 0]
         target_total = self.target_total_spin.value()
-        allocated = sum(q for _, q in outlet_targets)
+        allocated = sum(q for _, q, _ in outlet_targets)
         final_target = min(allocated, target_total) if allocated > 0 else target_total
 
         return {
@@ -188,11 +188,13 @@ class PlanExecutionDialog(QDialog):
         layout.addRow(info_label)
 
         self.plan_outlet_combo = QComboBox()
+        task_type_label = {'restock': '补货', 'recovery': '回收', 'replace': '替换'}
         for outlet in plan.get('outlets', []):
             remaining = outlet['target_quantity'] - outlet['completed_quantity']
-            if remaining > 0:
-                display = f"{outlet['outlet_name']} (还需{remaining}台 / 目标{outlet['target_quantity']}台)"
-                self.plan_outlet_combo.addItem(display, outlet)
+            task_type = outlet.get('task_type', 'restock')
+            task_label = task_type_label.get(task_type, task_type)
+            display = f"{outlet['outlet_name']} [{task_label}] (还需{remaining}台 / 目标{outlet['target_quantity']}台)"
+            self.plan_outlet_combo.addItem(display, outlet)
 
         batches = self.batch_service.get_all_batches()
         available_batches = [b for b in batches if b['remaining_quantity'] > 0]
@@ -265,7 +267,8 @@ class PlanExecutionDialog(QDialog):
             'batch_id': self.batch_combo.currentData(),
             'quantity': self.quantity_spin.value(),
             'operator': self.operator_edit.text().strip() or None,
-            'remark': self.remark_edit.toPlainText().strip() or None
+            'remark': self.remark_edit.toPlainText().strip() or None,
+            'task_type': outlet_data.get('task_type', 'restock')
         }
 
 
@@ -454,9 +457,9 @@ class OutboundTab(QWidget):
         plan_layout.addLayout(plan_button_layout)
 
         self.plan_table = QTableWidget()
-        self.plan_table.setColumnCount(10)
+        self.plan_table.setColumnCount(11)
         self.plan_table.setHorizontalHeaderLabels([
-            "ID", "计划号", "计划名称", "类型", "目标数量", "已完成",
+            "ID", "计划号", "计划名称", "类型", "任务类型", "目标数量", "已完成",
             "完成率", "状态", "优先级", "计划日期"
         ])
         self.plan_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
@@ -667,8 +670,9 @@ class OutboundTab(QWidget):
             self.plan_table.setItem(row, 1, QTableWidgetItem(plan['plan_no']))
             self.plan_table.setItem(row, 2, QTableWidgetItem(plan['plan_name']))
             self.plan_table.setItem(row, 3, QTableWidgetItem(plan['location_type']))
-            self.plan_table.setItem(row, 4, QTableWidgetItem(str(plan['target_quantity'])))
-            self.plan_table.setItem(row, 5, QTableWidgetItem(str(plan['completed_quantity'])))
+            self.plan_table.setItem(row, 4, QTableWidgetItem(plan.get('task_types', '-')))
+            self.plan_table.setItem(row, 5, QTableWidgetItem(str(plan['target_quantity'])))
+            self.plan_table.setItem(row, 6, QTableWidgetItem(str(plan['completed_quantity'])))
 
             progress = 0 if plan['target_quantity'] == 0 else (plan['completed_quantity'] / plan['target_quantity'] * 100)
             progress_item = QTableWidgetItem(f"{progress:.1f}%")
@@ -678,16 +682,16 @@ class OutboundTab(QWidget):
                 progress_item.setForeground(Qt.darkYellow)
             else:
                 progress_item.setForeground(Qt.red)
-            self.plan_table.setItem(row, 6, progress_item)
+            self.plan_table.setItem(row, 7, progress_item)
 
             status_text, status_color = status_map.get(plan['status'], (plan['status'], Qt.black))
             status_item = QTableWidgetItem(status_text)
             status_item.setForeground(status_color)
-            self.plan_table.setItem(row, 7, status_item)
+            self.plan_table.setItem(row, 8, status_item)
 
             priority_text = priority_map.get(plan.get('priority', ''), plan.get('priority', ''))
-            self.plan_table.setItem(row, 8, QTableWidgetItem(priority_text))
-            self.plan_table.setItem(row, 9, QTableWidgetItem(plan['plan_date']))
+            self.plan_table.setItem(row, 9, QTableWidgetItem(priority_text))
+            self.plan_table.setItem(row, 10, QTableWidgetItem(plan['plan_date']))
 
     def add_plan(self):
         outlets = self.batch_service.get_all_outlets()
@@ -759,6 +763,14 @@ class OutboundTab(QWidget):
             info_layout.addWidget(QLabel(f"<b>进度:</b> {plan['completed_quantity']}/{plan['target_quantity']} ({progress:.1f}%)"))
             status_map = {'pending': '待执行', 'in_progress': '进行中', 'completed': '已完成'}
             info_layout.addWidget(QLabel(f"<b>状态:</b> {status_map.get(plan['status'], plan['status'])}"))
+            task_type_summary = plan.get('task_type_summary', {})
+            if task_type_summary:
+                task_type_label = {'restock': '补货', 'recovery': '回收', 'replace': '替换'}
+                summary_parts = []
+                for tt, count in task_type_summary.items():
+                    label = task_type_label.get(tt, tt)
+                    summary_parts.append(f"{label}:{count}")
+                info_layout.addWidget(QLabel(f"<b>任务:</b> {', '.join(summary_parts)}"))
             info_layout.addStretch()
             layout.addWidget(info_group)
 
@@ -774,40 +786,49 @@ class OutboundTab(QWidget):
             outlet_layout = QVBoxLayout(outlet_tab)
             outlet_layout.addWidget(QLabel("各网点完成情况:"))
             outlet_table = QTableWidget()
-            outlet_table.setColumnCount(6)
-            outlet_table.setHorizontalHeaderLabels(["网点名称", "类型", "目标", "已完成", "剩余", "完成率"])
+            outlet_table.setColumnCount(7)
+            outlet_table.setHorizontalHeaderLabels(["网点名称", "类型", "任务类型", "目标", "已完成", "剩余", "完成率"])
             outlet_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
             outlets = plan.get('outlets', [])
             outlet_table.setRowCount(len(outlets))
+            task_type_label = {'restock': '补货', 'recovery': '回收', 'replace': '替换'}
+            task_type_color = {'restock': Qt.green, 'recovery': Qt.gray, 'replace': Qt.red}
             for r, o in enumerate(outlets):
                 outlet_table.setItem(r, 0, QTableWidgetItem(o['outlet_name']))
                 outlet_table.setItem(r, 1, QTableWidgetItem(o.get('outlet_location_type', '-')))
-                outlet_table.setItem(r, 2, QTableWidgetItem(str(o['target_quantity'])))
-                outlet_table.setItem(r, 3, QTableWidgetItem(str(o['completed_quantity'])))
+                task_type = o.get('task_type', 'restock')
+                task_type_item = QTableWidgetItem(task_type_label.get(task_type, task_type))
+                task_type_item.setForeground(task_type_color.get(task_type, Qt.black))
+                outlet_table.setItem(r, 2, task_type_item)
+                outlet_table.setItem(r, 3, QTableWidgetItem(str(o['target_quantity'])))
+                outlet_table.setItem(r, 4, QTableWidgetItem(str(o['completed_quantity'])))
                 remaining = o['target_quantity'] - o['completed_quantity']
                 remaining_item = QTableWidgetItem(str(remaining))
                 if remaining > 0:
                     remaining_item.setForeground(Qt.red)
-                outlet_table.setItem(r, 4, remaining_item)
+                outlet_table.setItem(r, 5, remaining_item)
                 outlet_p = 0 if o['target_quantity'] == 0 else (o['completed_quantity'] / o['target_quantity'] * 100)
-                outlet_table.setItem(r, 5, QTableWidgetItem(f"{outlet_p:.1f}%"))
+                outlet_table.setItem(r, 6, QTableWidgetItem(f"{outlet_p:.1f}%"))
             outlet_layout.addWidget(outlet_table)
 
             exec_tab = QWidget()
             exec_layout = QVBoxLayout(exec_tab)
             exec_layout.addWidget(QLabel("执行记录:"))
             exec_table = QTableWidget()
-            exec_table.setColumnCount(5)
-            exec_table.setHorizontalHeaderLabels(["出库单号", "批次号", "网点", "数量", "出库时间"])
+            exec_table.setColumnCount(6)
+            exec_table.setHorizontalHeaderLabels(["出库单号", "批次号", "网点", "任务类型", "数量", "出库时间"])
             exec_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
             executions = plan.get('executions', [])
             exec_table.setRowCount(len(executions))
+            task_type_label = {'restock': '补货', 'recovery': '回收', 'replace': '替换'}
             for r, e in enumerate(executions):
                 exec_table.setItem(r, 0, QTableWidgetItem(e['outbound_no']))
                 exec_table.setItem(r, 1, QTableWidgetItem(e['batch_no']))
                 exec_table.setItem(r, 2, QTableWidgetItem(e['outlet_name']))
-                exec_table.setItem(r, 3, QTableWidgetItem(str(e['quantity'])))
-                exec_table.setItem(r, 4, QTableWidgetItem(e['outbound_date']))
+                task_type = e.get('task_type', 'restock')
+                exec_table.setItem(r, 3, QTableWidgetItem(task_type_label.get(task_type, task_type)))
+                exec_table.setItem(r, 4, QTableWidgetItem(str(e['quantity'])))
+                exec_table.setItem(r, 5, QTableWidgetItem(e['outbound_date']))
             exec_layout.addWidget(exec_table)
 
             content_tabs.addTab(outlet_tab, "网点目标")

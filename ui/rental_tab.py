@@ -10,6 +10,7 @@ from PyQt5.QtCore import Qt, QDate
 from services.rental_service import RentalService
 from services.batch_service import BatchService
 from services.dashboard_service import DashboardService
+from services.billing_service import BillingService
 
 
 class ReturnDialog(QDialog):
@@ -84,6 +85,172 @@ class ReturnDialog(QDialog):
                 self.preview_label.setTextFormat(Qt.RichText)
             except Exception as e:
                 self.preview_label.setText(f"计算失败: {str(e)}")
+
+
+class ReconciliationOrderDialog(QDialog):
+    def __init__(self, outlet_id, outlet_name, start_date, end_date, rental_service, parent=None):
+        super().__init__(parent)
+        self.outlet_id = outlet_id
+        self.outlet_name = outlet_name
+        self.start_date = start_date
+        self.end_date = end_date
+        self.rental_service = rental_service
+        self.billing_service = BillingService(rental_service.db)
+        self.setWindowTitle(f"对账订单明细 - {outlet_name}")
+        self.setMinimumSize(1100, 700)
+        self.init_ui()
+        self.load_data()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+
+        info_label = QLabel("📌 差异说明：报表口径包含进行中订单，已完成口径仅统计已归还订单，差异为进行中订单未计入已完成营收导致")
+        info_label.setStyleSheet("padding: 8px; background-color: #fff3cd; color: #856404; border-radius: 4px;")
+        info_label.setWordWrap(True)
+        layout.addWidget(info_label)
+
+        self.tab_widget = QTabWidget()
+
+        self.active_tab = QWidget()
+        active_layout = QVBoxLayout(self.active_tab)
+        self.active_table = QTableWidget()
+        self.active_table.setColumnCount(6)
+        self.active_table.setHorizontalHeaderLabels(["订单号", "设备编号", "借出时间", "已借时长(分)", "预计金额", "状态"])
+        self.active_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.active_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.active_table.setSelectionBehavior(QTableWidget.SelectRows)
+        active_layout.addWidget(self.active_table)
+
+        self.completed_tab = QWidget()
+        completed_layout = QVBoxLayout(self.completed_tab)
+        self.completed_table = QTableWidget()
+        self.completed_table.setColumnCount(8)
+        self.completed_table.setHorizontalHeaderLabels(["订单号", "设备编号", "借出时间", "归还时间", "时长(分)", "计费金额", "实收金额", "状态"])
+        self.completed_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.completed_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.completed_table.setSelectionBehavior(QTableWidget.SelectRows)
+        completed_layout.addWidget(self.completed_table)
+
+        self.diff_tab = QWidget()
+        diff_layout = QVBoxLayout(self.diff_tab)
+        self.diff_text = QTextEdit()
+        self.diff_text.setReadOnly(True)
+        self.diff_text.setStyleSheet("font-size: 14px; line-height: 1.8;")
+        diff_layout.addWidget(self.diff_text)
+
+        self.tab_widget.addTab(self.active_tab, "🔴 进行中订单")
+        self.tab_widget.addTab(self.completed_tab, "✅ 已完成订单")
+        self.tab_widget.addTab(self.diff_tab, "📊 差异说明")
+        layout.addWidget(self.tab_widget, 1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def load_data(self):
+        orders = self.rental_service.get_outlet_orders_detail(self.outlet_id, self.start_date, self.end_date)
+
+        active_orders = [o for o in orders if o.get('status') == 'active']
+        completed_orders = [o for o in orders if o.get('status') == 'completed']
+
+        self.active_table.setRowCount(len(active_orders))
+        for row, order in enumerate(active_orders):
+            self.active_table.setItem(row, 0, QTableWidgetItem(order['order_no']))
+            self.active_table.setItem(row, 1, QTableWidgetItem(order['device_no']))
+            self.active_table.setItem(row, 2, QTableWidgetItem(order['borrow_time']))
+
+            try:
+                borrow = datetime.strptime(order['borrow_time'], '%Y-%m-%d %H:%M:%S')
+                now = datetime.now()
+                duration = int((now - borrow).total_seconds() / 60)
+                self.active_table.setItem(row, 3, QTableWidgetItem(str(duration)))
+
+                rule = self.billing_service.get_active_rule()
+                if rule:
+                    try:
+                        result = self.billing_service.calculate_rental_fee(borrow, now, rule['id'])
+                        est_amount = result['final_amount']
+                        est_item = QTableWidgetItem(f"¥{est_amount:.2f} (预估)")
+                        est_item.setForeground(Qt.red)
+                        self.active_table.setItem(row, 4, est_item)
+                    except:
+                        self.active_table.setItem(row, 4, QTableWidgetItem("待归还后确定"))
+                else:
+                    self.active_table.setItem(row, 4, QTableWidgetItem("待归还后确定"))
+            except:
+                self.active_table.setItem(row, 3, QTableWidgetItem("-"))
+                self.active_table.setItem(row, 4, QTableWidgetItem("待归还后确定"))
+
+            status_item = QTableWidgetItem("进行中")
+            status_item.setForeground(Qt.red)
+            self.active_table.setItem(row, 5, status_item)
+
+            for col in range(6):
+                item = self.active_table.item(row, col)
+                if item:
+                    item.setForeground(Qt.red)
+
+        self.completed_table.setRowCount(len(completed_orders))
+        for row, order in enumerate(completed_orders):
+            self.completed_table.setItem(row, 0, QTableWidgetItem(order['order_no']))
+            self.completed_table.setItem(row, 1, QTableWidgetItem(order['device_no']))
+            self.completed_table.setItem(row, 2, QTableWidgetItem(order['borrow_time']))
+            self.completed_table.setItem(row, 3, QTableWidgetItem(order.get('return_time', '-')))
+            self.completed_table.setItem(row, 4, QTableWidgetItem(str(order.get('duration_minutes') or '-')))
+
+            if order.get('calculated_amount') is not None:
+                self.completed_table.setItem(row, 5, QTableWidgetItem(f"{order['calculated_amount']:.2f}"))
+            else:
+                self.completed_table.setItem(row, 5, QTableWidgetItem('-'))
+
+            final_item = QTableWidgetItem(f"{order['final_amount']:.2f}")
+            final_item.setForeground(Qt.red)
+            self.completed_table.setItem(row, 6, final_item)
+
+            status_item = QTableWidgetItem("已完成")
+            status_item.setForeground(Qt.green)
+            self.completed_table.setItem(row, 7, status_item)
+
+        completed_revenue = sum(o['final_amount'] for o in completed_orders if o.get('final_amount'))
+
+        estimated_active = 0.0
+        can_estimate = True
+        rule = self.billing_service.get_active_rule()
+        if rule:
+            for order in active_orders:
+                try:
+                    borrow = datetime.strptime(order['borrow_time'], '%Y-%m-%d %H:%M:%S')
+                    now = datetime.now()
+                    result = self.billing_service.calculate_rental_fee(borrow, now, rule['id'])
+                    estimated_active += result['final_amount']
+                except:
+                    can_estimate = False
+                    break
+        else:
+            can_estimate = False
+
+        diff_text = f"""
+        <h3 style="color: #2c7be5;">📊 对账差异说明</h3>
+        <hr>
+        <p><b>网点名称:</b> {self.outlet_name}</p>
+        <p><b>统计周期:</b> {self.start_date} 至 {self.end_date}</p>
+        <hr>
+        <h4 style="color: #16a085;">📈 订单数量统计</h4>
+        <p><b>报表口径订单数:</b> {len(orders)} = {len(active_orders)} (进行中) + {len(completed_orders)} (已完成)</p>
+        <p><b>已完成口径订单数:</b> {len(completed_orders)}</p>
+        <p><b>⬆️ 差异订单数:</b> <span style="color: #e74c3c; font-weight: bold;">{len(active_orders)}</span></p>
+        <hr>
+        <h4 style="color: #16a085;">💰 营收金额统计</h4>
+        <p><b>已完成营收:</b> <span style="color: #27ae60; font-weight: bold;">¥{completed_revenue:.2f}</span></p>
+        <p><b>预计待收金额:</b> <span style="color: #e67e22; font-weight: bold;">{'¥{:.2f} (预估)'.format(estimated_active) if can_estimate else '待归还后确定'}</span></p>
+        <hr>
+        <h4 style="color: #8e44ad;">📌 结论</h4>
+        <p style="background-color: #e8f4f8; padding: 10px; border-radius: 4px;">
+        本次差异为 <b>{len(active_orders)}</b> 笔进行中订单导致，差异金额约 <b>{'¥{:.2f}'.format(estimated_active) if can_estimate else '未知'}</b>。
+        <br>这些订单尚未归还，未计入已完成营收，待设备归还后差异将自动抹平。
+        </p>
+        """
+        self.diff_text.setHtml(diff_text)
 
 
 class RentalTab(QWidget):
@@ -1057,56 +1224,9 @@ class RentalTab(QWidget):
         outlet_id = outlet['id']
 
         try:
-            orders = self.rental_service.get_outlet_orders_detail(outlet_id, start_date, end_date)
-
-            dialog = QDialog(self)
-            dialog.setWindowTitle(f"网点订单明细 - {outlet_name}")
-            dialog.setMinimumSize(1100, 700)
-            layout = QVBoxLayout(dialog)
-
-            info_layout = QHBoxLayout()
-            info_layout.addWidget(QLabel(f"<b>网点:</b> {outlet_name}"))
-            info_layout.addWidget(QLabel(f"<b>时间范围:</b> {start_date} 至 {end_date}"))
-            info_layout.addWidget(QLabel(f"<b>订单数:</b> {len(orders)}"))
-            total_rev = sum(o['final_amount'] for o in orders if o.get('final_amount'))
-            info_layout.addWidget(QLabel(f"<b>总营收:</b> <span style='color: red;'>{total_rev:.2f}</span> 元"))
-            info_layout.addStretch()
-            layout.addLayout(info_layout)
-
-            table = QTableWidget()
-            table.setColumnCount(9)
-            table.setHorizontalHeaderLabels([
-                "订单号", "设备编号", "规则", "借出时间", "归还时间",
-                "时长(分)", "计算金额", "实付金额", "封顶天数"
-            ])
-            table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-            table.setEditTriggers(QTableWidget.NoEditTriggers)
-            table.setRowCount(len(orders))
-            for r, order in enumerate(orders):
-                table.setItem(r, 0, QTableWidgetItem(order['order_no']))
-                table.setItem(r, 1, QTableWidgetItem(order['device_no']))
-                table.setItem(r, 2, QTableWidgetItem(order.get('rule_name', '-')))
-                table.setItem(r, 3, QTableWidgetItem(order['borrow_time']))
-                table.setItem(r, 4, QTableWidgetItem(order.get('return_time', '-')))
-                table.setItem(r, 5, QTableWidgetItem(str(order.get('duration_minutes') or '-')))
-                if order.get('calculated_amount') is not None:
-                    table.setItem(r, 6, QTableWidgetItem(f"{order['calculated_amount']:.2f}"))
-                else:
-                    table.setItem(r, 6, QTableWidgetItem('-'))
-                final_item = QTableWidgetItem(f"{order['final_amount']:.2f}")
-                final_item.setForeground(Qt.red)
-                table.setItem(r, 7, final_item)
-                if order.get('duration_minutes'):
-                    days = (order['duration_minutes'] - 1) // 1440 + 1
-                    table.setItem(r, 8, QTableWidgetItem(f"{days}天"))
-                else:
-                    table.setItem(r, 8, QTableWidgetItem('-'))
-            layout.addWidget(table, 1)
-
-            buttons = QDialogButtonBox(QDialogButtonBox.Close)
-            buttons.rejected.connect(dialog.reject)
-            layout.addWidget(buttons)
-
+            dialog = ReconciliationOrderDialog(
+                outlet_id, outlet_name, start_date, end_date, self.rental_service, self
+            )
             dialog.exec_()
         except Exception as e:
             QMessageBox.critical(self, "错误", f"查询失败: {str(e)}")

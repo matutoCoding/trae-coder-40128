@@ -38,12 +38,17 @@ class DeploymentPlanService:
                   plan_date, operator, remark, now, now))
             plan_id = cursor.lastrowid
 
-            for outlet_id, outlet_qty in outlet_targets:
+            for target in outlet_targets:
+                if len(target) == 3:
+                    outlet_id, outlet_qty, task_type = target
+                else:
+                    outlet_id, outlet_qty = target
+                    task_type = 'restock'
                 cursor.execute('''
                     INSERT INTO plan_outlets 
-                    (plan_id, outlet_id, target_quantity, completed_quantity)
-                    VALUES (?, ?, ?, 0)
-                ''', (plan_id, outlet_id, outlet_qty))
+                    (plan_id, outlet_id, target_quantity, completed_quantity, task_type)
+                    VALUES (?, ?, ?, 0, ?)
+                ''', (plan_id, outlet_id, outlet_qty, task_type))
 
             conn.commit()
             return plan_id
@@ -76,6 +81,17 @@ class DeploymentPlanService:
                 WHERE po.plan_id = ?
                 ORDER BY po.target_quantity DESC
             ''', (plan_id,))
+            plan['restock_outlets'] = [o for o in plan['outlets'] if o.get('task_type') == 'restock']
+            plan['recovery_outlets'] = [o for o in plan['outlets'] if o.get('task_type') == 'recovery']
+            plan['replace_outlets'] = [o for o in plan['outlets'] if o.get('task_type') == 'replace']
+            task_type_summary = {}
+            for o in plan['outlets']:
+                tt = o.get('task_type', 'restock')
+                if tt not in task_type_summary:
+                    task_type_summary[tt] = {'target_quantity': 0, 'completed_quantity': 0}
+                task_type_summary[tt]['target_quantity'] += o['target_quantity']
+                task_type_summary[tt]['completed_quantity'] += o['completed_quantity']
+            plan['task_type_summary'] = task_type_summary
             plan['executions'] = self.db.query('''
                 SELECT so.*, o.name as outlet_name, db.batch_no
                 FROM split_outbound so
@@ -86,7 +102,7 @@ class DeploymentPlanService:
             ''', (plan_id,))
         return plan
 
-    def execute_plan_outlet(self, plan_id, plan_outlet_id, batch_id, quantity, operator=None, outbound_date=None, remark=None):
+    def execute_plan_outlet(self, plan_id, plan_outlet_id, batch_id, quantity, operator=None, outbound_date=None, remark=None, task_type='restock'):
         conn = self.db.connect()
         cursor = conn.cursor()
         try:
@@ -114,7 +130,8 @@ class DeploymentPlanService:
                 outlet_id=po['outlet_id'],
                 operator=operator,
                 outbound_date=outbound_date,
-                remark=remark
+                remark=remark,
+                task_type=task_type
             )
 
             conn = self.db.connect()
@@ -124,9 +141,9 @@ class DeploymentPlanService:
 
             cursor.execute('''
                 UPDATE split_outbound 
-                SET plan_id = ?, plan_outlet_id = ?
+                SET plan_id = ?, plan_outlet_id = ?, task_type = ?
                 WHERE id = ?
-            ''', (plan_id, plan_outlet_id, result['outbound_id']))
+            ''', (plan_id, plan_outlet_id, task_type, result['outbound_id']))
 
             cursor.execute('''
                 UPDATE plan_outlets 
@@ -184,6 +201,7 @@ class DeploymentPlanService:
                 p.plan_name,
                 po.id as plan_outlet_id,
                 po.outlet_id,
+                po.task_type,
                 o.name as outlet_name,
                 (po.target_quantity - po.completed_quantity) as remaining
             FROM deployment_plans p

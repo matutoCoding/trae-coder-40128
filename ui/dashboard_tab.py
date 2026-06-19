@@ -195,10 +195,18 @@ class PlanDraftDialog(QDialog):
             spin = QSpinBox()
             spin.setRange(0, 9999)
             spin.setValue(qty)
+            spin.valueChanged.connect(self._update_alloc_summary)
             self.draft_table.setCellWidget(row, 3, spin)
             self.outlet_spinboxes.append((row, outlet_id, task_type, spin))
 
             self.draft_table.setItem(row, 4, QTableWidgetItem(reason))
+
+        summary_hbox = QHBoxLayout()
+        self.alloc_summary_label = QLabel()
+        self.alloc_summary_label.setStyleSheet("font-weight: bold; color: #2c7be5; font-size: 13px;")
+        summary_hbox.addWidget(self.alloc_summary_label)
+        summary_hbox.addStretch()
+        layout.addLayout(summary_hbox)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.button(QDialogButtonBox.Ok).setText("确认创建计划")
@@ -207,6 +215,27 @@ class PlanDraftDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+        self._update_alloc_summary()
+
+    def _update_alloc_summary(self):
+        restock_total = 0
+        recovery_total = 0
+        replace_total = 0
+
+        for row, outlet_id, task_type, spin in self.outlet_spinboxes:
+            qty = spin.value()
+            if task_type == 'restock':
+                restock_total += qty
+            elif task_type == 'recovery':
+                recovery_total += qty
+            elif task_type == 'replace':
+                replace_total += qty
+
+        net_target = restock_total + replace_total - recovery_total
+        self.alloc_summary_label.setText(
+            f"已分配: 补货{restock_total}台/回收{recovery_total}台/替换{replace_total}台 | 净目标:{net_target}台"
+        )
+
     def _on_accept(self):
         plan_name = self.name_edit.text().strip()
         if not plan_name:
@@ -214,38 +243,51 @@ class PlanDraftDialog(QDialog):
             return
 
         outlet_targets = []
-        recovery_infos = []
+        restock_total = 0
+        recovery_total = 0
+        replace_total = 0
         for row, outlet_id, task_type, spin in self.outlet_spinboxes:
             qty = spin.value()
             if qty <= 0:
                 continue
-            if task_type in ('restock', 'replace'):
-                outlet_targets.append((outlet_id, qty))
+            outlet_targets.append((outlet_id, qty, task_type))
+            if task_type == 'restock':
+                restock_total += qty
             elif task_type == 'recovery':
-                recovery_infos.append((outlet_id, qty))
+                recovery_total += qty
+            elif task_type == 'replace':
+                replace_total += qty
 
-        remark_parts = []
-        if recovery_infos:
-            recovery_desc = ", ".join([f"网点{oid}回收{q}台" for oid, q in recovery_infos])
-            remark_parts.append(f"回收任务: {recovery_desc}")
-        remark = self.draft.get('remark', '')
-        if remark_parts:
-            remark = (remark + " | " if remark else "") + "; ".join(remark_parts)
-
-        if not outlet_targets and not recovery_infos:
+        if not outlet_targets:
             QMessageBox.warning(self, "提示", "没有有效的调度数量")
             return
+
+        supply_total = restock_total + replace_total
+        if supply_total > 0:
+            target_quantity = max(supply_total - recovery_total, 0)
+            confirm_msg = (f"分配汇总:\n"
+                          f"  补货: {restock_total}台\n"
+                          f"  替换: {replace_total}台\n"
+                          f"  回收: {recovery_total}台\n"
+                          f"  净目标 = 补货+替换-回收 = {target_quantity}台\n\n"
+                          f"确认创建计划?")
+            reply = QMessageBox.question(self, "确认净目标", confirm_msg,
+                                         QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+            if reply != QMessageBox.Yes:
+                return
+        else:
+            target_quantity = recovery_total
 
         try:
             plan_id = self.plan_service.create_plan(
                 plan_name=plan_name,
                 location_type=self.draft.get('location_type', '混合类型'),
-                target_quantity=self.draft.get('target_quantity', 0),
+                target_quantity=target_quantity,
                 outlet_targets=outlet_targets,
                 priority=self.draft.get('priority', 'high'),
                 plan_date=self.draft.get('plan_date'),
                 operator=self.draft.get('operator'),
-                remark=remark
+                remark=self.draft.get('remark', '')
             )
             QMessageBox.information(self, "成功",
                                     f"调度计划创建成功!\n计划ID: {plan_id}\n建议前往【拆分出库】->【投放计划】页执行出库")

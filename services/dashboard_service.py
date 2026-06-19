@@ -248,36 +248,217 @@ class DashboardService:
         '''
         order_rows = self.db.query(order_sql, order_params if order_params else None)
 
-        in_use_sql = f'''
-            SELECT DATE(d.updated_at) as stat_date,
-                   COUNT(*) as in_use_devices
-            FROM devices d
-            JOIN outlets o ON d.outlet_id = o.id
-            {device_where}
-              AND d.status = 'in_use'
-            GROUP BY DATE(d.updated_at)
-        '''
-        in_use_rows = self.db.query(in_use_sql, device_params if device_params else None)
-        in_use_map = {r['stat_date']: r['in_use_devices'] for r in in_use_rows}
+        date_where_params = []
+        date_where = ""
+        if start_date:
+            date_where += " AND d.event_date >= ?"
+            date_where_params.append(start_date)
+        if end_date:
+            date_where += " AND d.event_date <= ?"
+            date_where_params.append(end_date)
 
-        faulty_sql = f'''
-            SELECT COUNT(*) as faulty_devices
-            FROM devices d
-            JOIN outlets o ON d.outlet_id = o.id
-            {device_where}
-              AND d.status = 'faulty'
+        rent_filter = ""
+        rent_params = []
+        if location_type:
+            rent_filter += " AND o.location_type = ?"
+            rent_params.append(location_type)
+        if outlet_id:
+            rent_filter += " AND ro.outlet_id = ?"
+            rent_params.append(outlet_id)
+
+        maint_filter = ""
+        maint_params = []
+        if location_type:
+            maint_filter += " AND o.location_type = ?"
+            maint_params.append(location_type)
+        if outlet_id:
+            maint_filter += " AND d.outlet_id = ?"
+            maint_params.append(outlet_id)
+
+        if granularity == 'weekly':
+            date_group = "strftime('%Y-W%W', d.event_date)"
+            date_select = f"{date_group} as stat_period, MAX(d.event_date) as period_end_date"
+            order_group = "strftime('%Y-W%W', ro.return_time)"
+            maint_group = "strftime('%Y-W%W', dm.maintenance_date)"
+        else:
+            date_group = "DATE(d.event_date)"
+            date_select = f"{date_group} as stat_period, DATE(d.event_date) as period_end_date"
+            order_group = "DATE(ro.return_time)"
+            maint_group = "DATE(dm.maintenance_date)"
+
+        all_params = date_where_params + rent_params + rent_params + maint_params + maint_params
+
+        if granularity == 'weekly':
+            borrow_group = "strftime('%Y-W%W', ro.borrow_time)"
+            return_group = "strftime('%Y-W%W', ro.return_time)"
+            maint_group_expr = "strftime('%Y-W%W', dm.maintenance_date)"
+        else:
+            borrow_group = "DATE(ro.borrow_time)"
+            return_group = "DATE(ro.return_time)"
+            maint_group_expr = "DATE(dm.maintenance_date)"
+
+        history_sql = f'''
+            WITH RECURSIVE date_range AS (
+                SELECT 
+                    COALESCE(
+                        (SELECT MIN(DATE(borrow_time)) FROM rental_orders WHERE DATE(borrow_time) IS NOT NULL),
+                        (SELECT MIN(DATE(return_time)) FROM rental_orders WHERE DATE(return_time) IS NOT NULL),
+                        (SELECT MIN(DATE(maintenance_date)) FROM device_maintenance WHERE DATE(maintenance_date) IS NOT NULL),
+                        DATE('now', '-30 days')
+                    ) as event_date
+                UNION ALL
+                SELECT DATE(event_date, '+1 day')
+                FROM date_range
+                WHERE event_date <= COALESCE(
+                    (SELECT MAX(DATE(return_time)) FROM rental_orders WHERE DATE(return_time) IS NOT NULL),
+                    (SELECT MAX(DATE(borrow_time)) FROM rental_orders WHERE DATE(borrow_time) IS NOT NULL),
+                    (SELECT MAX(DATE(maintenance_date)) FROM device_maintenance WHERE DATE(maintenance_date) IS NOT NULL),
+                    DATE('now')
+                )
+            ),
+            date_grouped AS (
+                SELECT {date_select}
+                FROM date_range d
+                WHERE 1=1 {date_where}
+                GROUP BY {date_group}
+                ORDER BY period_end_date
+            ),
+            all_rent_events AS (
+                SELECT 
+                    {borrow_group} as stat_period,
+                    1 as is_borrow,
+                    0 as is_return
+                FROM rental_orders ro
+                JOIN outlets o ON ro.outlet_id = o.id
+                WHERE ro.borrow_time IS NOT NULL {rent_filter}
+                UNION ALL
+                SELECT 
+                    {return_group} as stat_period,
+                    0 as is_borrow,
+                    1 as is_return
+                FROM rental_orders ro
+                JOIN outlets o ON ro.outlet_id = o.id
+                WHERE ro.return_time IS NOT NULL {rent_filter}
+            ),
+            daily_change AS (
+                SELECT 
+                    stat_period,
+                    SUM(is_borrow) as borrows,
+                    SUM(is_return) as returns,
+                    SUM(is_borrow) - SUM(is_return) as delta_in_use
+                FROM all_rent_events
+                GROUP BY stat_period
+            ),
+            all_maint_events AS (
+                SELECT 
+                    {maint_group_expr} as stat_period,
+                    1 as is_lock,
+                    0 as is_unlock
+                FROM device_maintenance dm
+                JOIN devices d ON dm.device_id = d.id
+                JOIN outlets o ON d.outlet_id = o.id
+                WHERE dm.maintenance_type = 'lock' {maint_filter}
+                UNION ALL
+                SELECT 
+                    {maint_group_expr} as stat_period,
+                    0 as is_lock,
+                    1 as is_unlock
+                FROM device_maintenance dm
+                JOIN devices d ON dm.device_id = d.id
+                JOIN outlets o ON d.outlet_id = o.id
+                WHERE dm.maintenance_type = 'unlock' {maint_filter}
+            ),
+            daily_fault AS (
+                SELECT 
+                    stat_period,
+                    SUM(is_lock) as locks,
+                    SUM(is_unlock) as unlocks,
+                    SUM(is_lock) - SUM(is_unlock) as delta_fault
+                FROM all_maint_events
+                GROUP BY stat_period
+            ),
+            period_changes AS (
+                SELECT 
+                    dg.stat_period,
+                    dg.period_end_date,
+                    COALESCE(dc.delta_in_use, 0) as delta_in_use,
+                    COALESCE(df.delta_fault, 0) as delta_fault
+                FROM date_grouped dg
+                LEFT JOIN daily_change dc ON dc.stat_period = dg.stat_period
+                LEFT JOIN daily_fault df ON df.stat_period = dg.stat_period
+            )
+            SELECT 
+                stat_period,
+                period_end_date,
+                SUM(delta_in_use) OVER (ORDER BY period_end_date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) as cumulative_in_use,
+                SUM(delta_fault) OVER (ORDER BY period_end_date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) as cumulative_fault
+            FROM period_changes
+            ORDER BY period_end_date
         '''
-        faulty_row = self.db.query_one(faulty_sql, device_params if device_params else None)
-        current_faulty = faulty_row.get('faulty_devices', 0) if faulty_row else 0
+
+        history_rows = self.db.query(history_sql, all_params if all_params else None)
+        has_history = False
+        in_use_map = {}
+        faulty_map = {}
+
+        if history_rows:
+            total_delta_in_use = sum(abs(r.get('cumulative_in_use', 0)) for r in history_rows)
+            total_delta_fault = sum(abs(r.get('cumulative_fault', 0)) for r in history_rows)
+            if total_delta_in_use > 0 or total_delta_fault > 0:
+                has_history = True
+                for r in history_rows:
+                    period = r['stat_period']
+                    in_use_map[period] = max(0, r.get('cumulative_in_use', 0) or 0)
+                    faulty_map[period] = max(0, r.get('cumulative_fault', 0) or 0)
+
+        if not has_history:
+            current_in_use_sql = f'''
+                SELECT COUNT(*) as in_use_devices
+                FROM devices d
+                JOIN outlets o ON d.outlet_id = o.id
+                {device_where}
+                  AND d.status = 'in_use'
+            '''
+            current_in_use_row = self.db.query_one(current_in_use_sql, device_params if device_params else None)
+            current_in_use = current_in_use_row.get('in_use_devices', 0) if current_in_use_row else 0
+
+            faulty_sql = f'''
+                SELECT COUNT(*) as faulty_devices
+                FROM devices d
+                JOIN outlets o ON d.outlet_id = o.id
+                {device_where}
+                  AND d.status = 'faulty'
+            '''
+            faulty_row = self.db.query_one(faulty_sql, device_params if device_params else None)
+            current_faulty = faulty_row.get('faulty_devices', 0) if faulty_row else 0
+
+            result = []
+            for row in order_rows:
+                item = {
+                    'stat_date': row['stat_date'],
+                    'orders': row['orders'],
+                    'revenue': row['revenue'],
+                    'in_use_devices': current_in_use,
+                    'faulty_devices': current_faulty,
+                }
+                if granularity == 'weekly':
+                    item['stat_week'] = row['stat_week']
+                result.append(item)
+            return result
 
         result = []
         for row in order_rows:
+            if granularity == 'weekly':
+                period = row['stat_week']
+            else:
+                period = row['stat_date']
+
             item = {
                 'stat_date': row['stat_date'],
                 'orders': row['orders'],
                 'revenue': row['revenue'],
-                'in_use_devices': in_use_map.get(row['stat_date'], 0),
-                'faulty_devices': current_faulty,
+                'in_use_devices': in_use_map.get(period, 0),
+                'faulty_devices': faulty_map.get(period, 0),
             }
             if granularity == 'weekly':
                 item['stat_week'] = row['stat_week']
