@@ -236,8 +236,78 @@ class RentalTab(QWidget):
         self.faulty_table.setEditTriggers(QTableWidget.NoEditTriggers)
         faulty_layout.addWidget(self.faulty_table)
 
+        report_page = QWidget()
+        report_layout = QVBoxLayout(report_page)
+
+        report_filter_layout = QHBoxLayout()
+        report_filter_layout.addWidget(QLabel("开始日期:"))
+        self.report_start_date = QDateEdit()
+        self.report_start_date.setCalendarPopup(True)
+        self.report_start_date.setDate(QDate.currentDate().addDays(-30))
+        self.report_start_date.setDisplayFormat("yyyy-MM-dd")
+        report_filter_layout.addWidget(self.report_start_date)
+        report_filter_layout.addWidget(QLabel("结束日期:"))
+        self.report_end_date = QDateEdit()
+        self.report_end_date.setCalendarPopup(True)
+        self.report_end_date.setDate(QDate.currentDate())
+        self.report_end_date.setDisplayFormat("yyyy-MM-dd")
+        report_filter_layout.addWidget(self.report_end_date)
+        self.generate_report_btn = QPushButton("📊 生成营收报表")
+        self.generate_report_btn.clicked.connect(self.generate_revenue_report)
+        report_filter_layout.addWidget(self.generate_report_btn)
+        self.view_outlet_orders_btn = QPushButton("📋 查看网点订单明细")
+        self.view_outlet_orders_btn.clicked.connect(self.view_outlet_order_detail)
+        report_filter_layout.addWidget(self.view_outlet_orders_btn)
+        report_filter_layout.addStretch()
+        report_layout.addLayout(report_filter_layout)
+
+        self.report_summary_group = QGroupBox("汇总数据")
+        self.report_summary_labels = {}
+        summary_items = [
+            ('outlet_count', '涉及网点'),
+            ('total_orders', '总订单'),
+            ('completed_orders', '已完成'),
+            ('total_revenue', '总营收'),
+            ('avg_amount', '平均客单价'),
+            ('avg_duration', '平均时长')
+        ]
+        rsum_layout = QHBoxLayout(self.report_summary_group)
+        for key, label in summary_items:
+            item_layout = QVBoxLayout()
+            self.report_summary_labels[key] = QLabel("0")
+            self.report_summary_labels[key].setStyleSheet("font-size: 16px; font-weight: bold; color: #2c7be5;")
+            item_layout.addWidget(self.report_summary_labels[key])
+            item_layout.addWidget(QLabel(label))
+            rsum_layout.addLayout(item_layout)
+        report_layout.addWidget(self.report_summary_group)
+
+        self.report_table = QTableWidget()
+        self.report_table.setColumnCount(9)
+        self.report_table.setHorizontalHeaderLabels([
+            "网点ID", "网点名称", "类型", "订单数", "已完成", "进行中",
+            "营收(元)", "平均金额(元)", "平均时长(分)"
+        ])
+        self.report_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.report_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.report_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        report_layout.addWidget(self.report_table, 1)
+
+        type_group = QGroupBox("按网点类型汇总")
+        type_layout = QHBoxLayout(type_group)
+        self.location_type_table = QTableWidget()
+        self.location_type_table.setColumnCount(5)
+        self.location_type_table.setHorizontalHeaderLabels([
+            "网点类型", "网点数", "订单数", "营收(元)", "平均金额(元)"
+        ])
+        self.location_type_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.location_type_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.location_type_table.setMaximumHeight(150)
+        type_layout.addWidget(self.location_type_table)
+        report_layout.addWidget(type_group)
+
         self.tab_widget.addTab(orders_page, "租借订单")
         self.tab_widget.addTab(bills_page, "账单管理")
+        self.tab_widget.addTab(report_page, "📊 营收报表")
         self.tab_widget.addTab(faulty_page, "坏宝管理")
 
         main_layout.addWidget(self.tab_widget, 1)
@@ -585,3 +655,123 @@ class RentalTab(QWidget):
                 QMessageBox.warning(self, "警告", str(e))
             except Exception as e:
                 QMessageBox.critical(self, "错误", f"解锁失败: {str(e)}")
+
+    def generate_revenue_report(self):
+        start_date = self.report_start_date.date().toString("yyyy-MM-dd")
+        end_date = self.report_end_date.date().toString("yyyy-MM-dd")
+
+        try:
+            report_data = self.rental_service.get_revenue_report_by_outlet(start_date, end_date)
+            summary = self.rental_service.get_revenue_report_summary(start_date, end_date)
+            loc_type_data = self.rental_service.get_revenue_by_location_type(start_date, end_date)
+
+            if summary:
+                for key, label in self.report_summary_labels.items():
+                    value = summary.get(key, 0) or 0
+                    if isinstance(value, float):
+                        if key == 'avg_duration':
+                            label.setText(f"{value:.0f} 分")
+                        else:
+                            label.setText(f"{value:.2f} 元")
+                    else:
+                        label.setText(str(value))
+
+            self.report_table.setRowCount(len(report_data))
+            for row, data in enumerate(report_data):
+                self.report_table.setItem(row, 0, QTableWidgetItem(str(data['outlet_id'])))
+                self.report_table.setItem(row, 1, QTableWidgetItem(data['outlet_name']))
+                self.report_table.setItem(row, 2, QTableWidgetItem(data.get('location_type', '-')))
+                self.report_table.setItem(row, 3, QTableWidgetItem(str(data['order_count'])))
+                self.report_table.setItem(row, 4, QTableWidgetItem(str(data['completed_count'])))
+                self.report_table.setItem(row, 5, QTableWidgetItem(str(data['active_count'])))
+
+                revenue_item = QTableWidgetItem(f"{data['total_revenue']:.2f}")
+                revenue_item.setForeground(Qt.red)
+                self.report_table.setItem(row, 6, revenue_item)
+
+                self.report_table.setItem(row, 7, QTableWidgetItem(f"{data['avg_amount']:.2f}"))
+                self.report_table.setItem(row, 8, QTableWidgetItem(f"{data['avg_duration']:.0f}"))
+
+            self.location_type_table.setRowCount(len(loc_type_data))
+            for row, data in enumerate(loc_type_data):
+                self.location_type_table.setItem(row, 0, QTableWidgetItem(data.get('location_type') or '其他'))
+                self.location_type_table.setItem(row, 1, QTableWidgetItem(str(data['outlet_count'])))
+                self.location_type_table.setItem(row, 2, QTableWidgetItem(str(data['order_count'])))
+
+                revenue_item = QTableWidgetItem(f"{data['total_revenue']:.2f}")
+                revenue_item.setForeground(Qt.red)
+                self.location_type_table.setItem(row, 3, revenue_item)
+                self.location_type_table.setItem(row, 4, QTableWidgetItem(f"{data['avg_amount']:.2f}"))
+
+            QMessageBox.information(self, "成功",
+                f"报表生成完成!\n涉及网点: {summary.get('outlet_count',0)}个\n"
+                f"订单数: {summary.get('total_orders',0)}笔\n"
+                f"总营收: {summary.get('total_revenue',0):.2f}元")
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"生成报表失败: {str(e)}")
+
+    def view_outlet_order_detail(self):
+        current_row = self.report_table.currentRow()
+        if current_row < 0:
+            QMessageBox.warning(self, "警告", "请从营收报表中选择要查看的网点")
+            return
+
+        start_date = self.report_start_date.date().toString("yyyy-MM-dd")
+        end_date = self.report_end_date.date().toString("yyyy-MM-dd")
+        outlet_id = int(self.report_table.item(current_row, 0).text())
+        outlet_name = self.report_table.item(current_row, 1).text()
+
+        try:
+            orders = self.rental_service.get_outlet_orders_detail(outlet_id, start_date, end_date)
+
+            dialog = QDialog(self)
+            dialog.setWindowTitle(f"网点订单明细 - {outlet_name}")
+            dialog.setMinimumSize(1100, 700)
+            layout = QVBoxLayout(dialog)
+
+            info_layout = QHBoxLayout()
+            info_layout.addWidget(QLabel(f"<b>网点:</b> {outlet_name}"))
+            info_layout.addWidget(QLabel(f"<b>时间范围:</b> {start_date} 至 {end_date}"))
+            info_layout.addWidget(QLabel(f"<b>订单数:</b> {len(orders)}"))
+            total_rev = sum(o['final_amount'] for o in orders if o.get('final_amount'))
+            info_layout.addWidget(QLabel(f"<b>总营收:</b> <span style='color: red;'>{total_rev:.2f}</span> 元"))
+            info_layout.addStretch()
+            layout.addLayout(info_layout)
+
+            table = QTableWidget()
+            table.setColumnCount(9)
+            table.setHorizontalHeaderLabels([
+                "订单号", "设备编号", "规则", "借出时间", "归还时间",
+                "时长(分)", "计算金额", "实付金额", "封顶天数"
+            ])
+            table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+            table.setEditTriggers(QTableWidget.NoEditTriggers)
+            table.setRowCount(len(orders))
+            for row, order in enumerate(orders):
+                table.setItem(row, 0, QTableWidgetItem(order['order_no']))
+                table.setItem(row, 1, QTableWidgetItem(order['device_no']))
+                table.setItem(row, 2, QTableWidgetItem(order.get('rule_name', '-')))
+                table.setItem(row, 3, QTableWidgetItem(order['borrow_time']))
+                table.setItem(row, 4, QTableWidgetItem(order.get('return_time', '-')))
+                table.setItem(row, 5, QTableWidgetItem(str(order.get('duration_minutes') or '-')))
+                if order.get('calculated_amount') is not None:
+                    table.setItem(row, 6, QTableWidgetItem(f"{order['calculated_amount']:.2f}"))
+                else:
+                    table.setItem(row, 6, QTableWidgetItem('-'))
+                final_item = QTableWidgetItem(f"{order['final_amount']:.2f}")
+                final_item.setForeground(Qt.red)
+                table.setItem(row, 7, final_item)
+                if order.get('duration_minutes'):
+                    days = (order['duration_minutes'] - 1) // 1440 + 1
+                    table.setItem(row, 8, QTableWidgetItem(f"{days}天"))
+                else:
+                    table.setItem(row, 8, QTableWidgetItem('-'))
+            layout.addWidget(table, 1)
+
+            buttons = QDialogButtonBox(QDialogButtonBox.Close)
+            buttons.rejected.connect(dialog.reject)
+            layout.addWidget(buttons)
+
+            dialog.exec_()
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"查询失败: {str(e)}")

@@ -383,3 +383,94 @@ class RentalService:
             params.append(end_date)
 
         return self.db.query_one(sql, params if params else None)
+
+    def get_revenue_report_by_outlet(self, start_date, end_date):
+        sql = '''
+            SELECT 
+                o.id as outlet_id,
+                o.name as outlet_name,
+                o.location_type,
+                COUNT(ro.id) as order_count,
+                COUNT(CASE WHEN ro.status = 'completed' THEN 1 END) as completed_count,
+                COUNT(CASE WHEN ro.status = 'active' THEN 1 END) as active_count,
+                COALESCE(SUM(CASE WHEN ro.status = 'completed' THEN ro.final_amount END), 0) as total_revenue,
+                COALESCE(AVG(CASE WHEN ro.status = 'completed' THEN ro.final_amount END), 0) as avg_amount,
+                COALESCE(AVG(CASE WHEN ro.status = 'completed' THEN ro.duration_minutes END), 0) as avg_duration,
+                COALESCE(SUM(CASE WHEN ro.status = 'completed' THEN ro.duration_minutes END), 0) as total_duration_minutes
+            FROM outlets o
+            LEFT JOIN rental_orders ro ON ro.outlet_id = o.id
+                AND DATE(ro.return_time) >= ? 
+                AND DATE(ro.return_time) <= ?
+            WHERE o.status = 1
+            GROUP BY o.id, o.name, o.location_type
+            HAVING COUNT(ro.id) > 0
+            ORDER BY total_revenue DESC
+        '''
+        return self.db.query(sql, (start_date, end_date))
+
+    def get_revenue_report_summary(self, start_date, end_date):
+        sql = '''
+            SELECT 
+                COUNT(DISTINCT ro.outlet_id) as outlet_count,
+                COUNT(ro.id) as total_orders,
+                COUNT(CASE WHEN ro.status = 'completed' THEN 1 END) as completed_orders,
+                COUNT(CASE WHEN ro.status = 'active' THEN 1 END) as active_orders,
+                COALESCE(SUM(CASE WHEN ro.status = 'completed' THEN ro.final_amount END), 0) as total_revenue,
+                COALESCE(AVG(CASE WHEN ro.status = 'completed' THEN ro.final_amount END), 0) as avg_amount,
+                COALESCE(AVG(CASE WHEN ro.status = 'completed' THEN ro.duration_minutes END), 0) as avg_duration
+            FROM rental_orders ro
+            WHERE DATE(ro.return_time) >= ? 
+              AND DATE(ro.return_time) <= ?
+        '''
+        return self.db.query_one(sql, (start_date, end_date))
+
+    def get_outlet_orders_detail(self, outlet_id, start_date, end_date):
+        return self.db.query('''
+            SELECT ro.*,
+                   d.device_no,
+                   o.name as outlet_name,
+                   br.name as rule_name
+            FROM rental_orders ro
+            JOIN devices d ON ro.device_id = d.id
+            JOIN outlets o ON ro.outlet_id = o.id
+            JOIN billing_rules br ON ro.billing_rule_id = br.id
+            WHERE ro.outlet_id = ?
+              AND DATE(ro.return_time) >= ? 
+              AND DATE(ro.return_time) <= ?
+              AND ro.status = 'completed'
+            ORDER BY ro.return_time DESC
+        ''', (outlet_id, start_date, end_date))
+
+    def get_revenue_by_location_type(self, start_date, end_date):
+        return self.db.query('''
+            SELECT 
+                o.location_type,
+                COUNT(DISTINCT o.id) as outlet_count,
+                COUNT(ro.id) as order_count,
+                COALESCE(SUM(CASE WHEN ro.status = 'completed' THEN ro.final_amount END), 0) as total_revenue,
+                COALESCE(AVG(CASE WHEN ro.status = 'completed' THEN ro.final_amount END), 0) as avg_amount
+            FROM outlets o
+            LEFT JOIN rental_orders ro ON ro.outlet_id = o.id
+                AND DATE(ro.return_time) >= ? 
+                AND DATE(ro.return_time) <= ?
+            WHERE o.status = 1
+            GROUP BY o.location_type
+            ORDER BY total_revenue DESC
+        ''', (start_date, end_date))
+
+    def get_daily_revenue_trend(self, start_date, end_date, outlet_id=None):
+        sql = '''
+            SELECT 
+                DATE(ro.return_time) as stat_date,
+                COUNT(ro.id) as order_count,
+                COALESCE(SUM(CASE WHEN ro.status = 'completed' THEN ro.final_amount END), 0) as revenue
+            FROM rental_orders ro
+            WHERE DATE(ro.return_time) >= ? 
+              AND DATE(ro.return_time) <= ?
+        '''
+        params = [start_date, end_date]
+        if outlet_id:
+            sql += " AND ro.outlet_id = ?"
+            params.append(outlet_id)
+        sql += " GROUP BY DATE(ro.return_time) ORDER BY stat_date"
+        return self.db.query(sql, params)

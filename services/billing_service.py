@@ -75,7 +75,7 @@ class BillingService:
             calculated_amount = start_price + (billable_hours - 1) * price_per_hour
 
             if max_price_per_day > 0:
-                rental_days = (return_time.date() - borrow_time.date()).days + 1
+                rental_days = (duration_minutes - 1) // 1440 + 1
                 max_total = max_price_per_day * rental_days
                 final_amount = min(calculated_amount, max_total)
             else:
@@ -84,9 +84,11 @@ class BillingService:
         final_amount = round(final_amount, 2)
         calculated_amount = round(calculated_amount, 2)
 
+        rental_days = (duration_minutes - 1) // 1440 + 1 if duration_minutes > 0 else 1
         return {
             'duration_minutes': duration_minutes,
             'billable_minutes': billable_minutes,
+            'rental_days': rental_days,
             'start_price': start_price,
             'price_per_hour': price_per_hour,
             'max_price_per_day': max_price_per_day,
@@ -160,7 +162,7 @@ class BillingService:
             })
 
             if max_price_per_day > 0:
-                days = (duration_minutes // 1440) + 1
+                days = (duration_minutes - 1) // 1440 + 1
                 max_total = max_price_per_day * days
                 if total > max_total:
                     breakdown['steps'].append({

@@ -163,3 +163,163 @@ class BatchService:
                 (SELECT COUNT(*) FROM devices WHERE status = 'faulty') as faulty,
                 (SELECT COUNT(*) FROM outlets WHERE status = 1) as active_outlets
         ''')[0]
+
+    def get_batch_timeline(self, batch_id):
+        events = []
+
+        batch = self.get_batch_by_id(batch_id)
+        if not batch:
+            return events
+
+        events.append({
+            'type': '入库',
+            'icon': '📥',
+            'time': batch['created_at'],
+            'title': f'批次入库 - {batch["batch_no"]}',
+            'description': f'采购{batch["total_quantity"]}台，型号:{batch.get("model") or "未知"}，供应商:{batch.get("supplier") or "未知"}',
+            'device_range': f'{batch["total_quantity"]}台'
+        })
+
+        outbounds = self.db.query('''
+            SELECT so.*, o.name as outlet_name, o.location_type,
+                   dp.plan_name, dp.plan_no
+            FROM split_outbound so
+            JOIN outlets o ON so.outlet_id = o.id
+            LEFT JOIN deployment_plans dp ON so.plan_id = dp.id
+            WHERE so.batch_id = ?
+            ORDER BY so.outbound_date
+        ''', (batch_id,))
+
+        for ob in outbounds:
+            plan_info = f'（计划:{ob["plan_no"]} - {ob["plan_name"]}）' if ob.get('plan_name') else ''
+            events.append({
+                'type': '出库',
+                'icon': '🚚',
+                'time': ob['outbound_date'],
+                'title': f'拆分出库至{ob["outlet_name"]}',
+                'description': f'出库{ob["quantity"]}台到{ob.get("location_type","")}网点{plan_info}，操作员:{ob.get("operator","未记录")}',
+                'device_range': f'{ob["quantity"]}台'
+            })
+
+            devices = self.db.query('''
+                SELECT d.* FROM devices d
+                WHERE d.split_outbound_id = ?
+                ORDER BY d.device_no
+            ''', (ob['id'],))
+
+            for device in devices:
+                if device.get('last_borrow_time'):
+                    orders = self.db.query('''
+                        SELECT ro.*, o.name as outlet_name
+                        FROM rental_orders ro
+                        JOIN outlets o ON ro.outlet_id = o.id
+                        WHERE ro.device_id = ? AND ro.status = 'completed'
+                        ORDER BY ro.borrow_time
+                    ''', (device['id'],))
+
+                    for order in orders:
+                        duration = f'{order["duration_minutes"]}分钟' if order.get('duration_minutes') else '未归还'
+                        amount = f'{order["final_amount"]:.2f}元' if order.get('final_amount') is not None else '计费中'
+                        events.append({
+                            'type': '租借',
+                            'icon': '🔋',
+                            'time': order['borrow_time'],
+                            'title': f'设备{device["device_no"]}被租借',
+                            'description': f'{order.get("outlet_name","")}网点借出，时长{duration}，收费{amount}',
+                            'device_range': device['device_no']
+                        })
+
+                maintenance = self.db.query('''
+                    SELECT dm.* FROM device_maintenance dm
+                    WHERE dm.device_id = ?
+                    ORDER BY dm.maintenance_date
+                ''', (device['id'],))
+
+                for m in maintenance:
+                    action = '故障锁定' if m['maintenance_type'] == 'lock' else '解锁恢复'
+                    icon = '⚠️' if m['maintenance_type'] == 'lock' else '✅'
+                    events.append({
+                        'type': '维护',
+                        'icon': icon,
+                        'time': m['maintenance_date'],
+                        'title': f'设备{device["device_no"]}{action}',
+                        'description': f'{m.get("description","无描述")}，操作员:{m.get("operator","未记录")}',
+                        'device_range': device['device_no']
+                    })
+
+        events.sort(key=lambda x: x['time'])
+        return events
+
+    def get_device_full_timeline(self, device_no):
+        events = []
+
+        device = self.db.query_one('''
+            SELECT d.*, db.batch_no, db.created_at as batch_created_at,
+                   o.name as outlet_name, o.location_type,
+                   so.outbound_no, so.outbound_date
+            FROM devices d
+            JOIN device_batches db ON d.batch_id = db.id
+            LEFT JOIN split_outbound so ON d.split_outbound_id = so.id
+            LEFT JOIN outlets o ON d.outlet_id = o.id
+            WHERE d.device_no = ?
+        ''', (device_no,))
+
+        if not device:
+            return []
+
+        events.append({
+            'type': '入库',
+            'icon': '📥',
+            'time': device['batch_created_at'],
+            'title': f'批次入库 - {device["batch_no"]}',
+            'description': f'设备{device_no}随批次入库'
+        })
+
+        if device.get('outbound_date'):
+            events.append({
+                'type': '出库',
+                'icon': '🚚',
+                'time': device['outbound_date'],
+                'title': f'出库至{device.get("outlet_name","")}',
+                'description': f'通过{device["outbound_no"]}投放至{device.get("location_type","")}网点'
+            })
+
+        orders = self.db.query('''
+            SELECT ro.*, o.name as outlet_name
+            FROM rental_orders ro
+            JOIN outlets o ON ro.outlet_id = o.id
+            WHERE ro.device_id = ?
+            ORDER BY ro.borrow_time
+        ''', (device['id'],))
+
+        for order in orders:
+            status = '进行中' if order['status'] == 'active' else '已完成'
+            duration = f'{order["duration_minutes"]}分钟' if order.get('duration_minutes') else '-'
+            amount = f'{order["final_amount"]:.2f}元' if order.get('final_amount') is not None else '-'
+            events.append({
+                'type': '租借',
+                'icon': '🔋',
+                'time': order['borrow_time'],
+                'title': f'租借{status}',
+                'description': f'{order.get("outlet_name","")}借出，时长{duration}，收费{amount}'
+            })
+
+        maintenance = self.db.query('''
+            SELECT dm.* FROM device_maintenance dm
+            WHERE dm.device_id = ?
+            ORDER BY dm.maintenance_date
+        ''', (device['id'],))
+
+        for m in maintenance:
+            action = '故障锁定下架' if m['maintenance_type'] == 'lock' else '解锁恢复使用'
+            icon = '⚠️' if m['maintenance_type'] == 'lock' else '✅'
+            events.append({
+                'type': '维护',
+                'icon': icon,
+                'time': m['maintenance_date'],
+                'title': action,
+                'description': f'{m.get("description","无描述")}，操作员:{m.get("operator","未记录")}'
+            })
+
+        events.sort(key=lambda x: x['time'])
+        return events

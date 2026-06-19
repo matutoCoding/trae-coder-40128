@@ -170,6 +170,46 @@ class Database:
             )
         ''')
 
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS deployment_plans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                plan_no TEXT NOT NULL UNIQUE,
+                plan_name TEXT NOT NULL,
+                location_type TEXT NOT NULL,
+                target_quantity INTEGER NOT NULL,
+                completed_quantity INTEGER NOT NULL DEFAULT 0,
+                priority TEXT DEFAULT 'normal',
+                plan_date TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                operator TEXT,
+                remark TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS plan_outlets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                plan_id INTEGER NOT NULL,
+                outlet_id INTEGER NOT NULL,
+                target_quantity INTEGER NOT NULL,
+                completed_quantity INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY (plan_id) REFERENCES deployment_plans(id),
+                FOREIGN KEY (outlet_id) REFERENCES outlets(id)
+            )
+        ''')
+
+        try:
+            cursor.execute("ALTER TABLE split_outbound ADD COLUMN plan_id INTEGER REFERENCES deployment_plans(id)")
+        except sqlite3.OperationalError:
+            pass
+
+        try:
+            cursor.execute("ALTER TABLE split_outbound ADD COLUMN plan_outlet_id INTEGER REFERENCES plan_outlets(id)")
+        except sqlite3.OperationalError:
+            pass
+
         conn.commit()
 
         cursor.execute("SELECT COUNT(*) FROM billing_rules WHERE is_active = 1")

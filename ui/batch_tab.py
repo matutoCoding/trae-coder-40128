@@ -1,9 +1,151 @@
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
                              QPushButton, QDialog, QFormLayout, QLineEdit, QDoubleSpinBox,
                              QSpinBox, QMessageBox, QHeaderView, QLabel, QGroupBox,
-                             QDialogButtonBox, QDateEdit, QTextEdit, QSplitter, QComboBox)
+                             QDialogButtonBox, QDateEdit, QTextEdit, QSplitter, QComboBox,
+                             QScrollArea, QFrame, QSizePolicy, QTabWidget)
 from PyQt5.QtCore import Qt, QDate
+from PyQt5.QtGui import QFont
 from services.batch_service import BatchService
+
+
+class TimelineDialog(QDialog):
+    def __init__(self, parent=None, batch_id=None, service=None, device_no=None):
+        super().__init__(parent)
+        self.batch_id = batch_id
+        self.service = service
+        self.device_no = device_no
+
+        if device_no:
+            self.setWindowTitle(f"设备全链路追踪 - {device_no}")
+        else:
+            batch = service.get_batch_by_id(batch_id)
+            self.setWindowTitle(f"批次全链路追踪 - {batch['batch_no'] if batch else ''}")
+
+        self.setMinimumSize(1000, 750)
+        self.init_ui()
+        self.load_timeline()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll_content = QWidget()
+        self.timeline_layout = QVBoxLayout(scroll_content)
+        self.timeline_layout.setSpacing(12)
+        self.timeline_layout.setContentsMargins(20, 20, 20, 20)
+        scroll.setWidget(scroll_content)
+        layout.addWidget(scroll, 1)
+
+        stats_layout = QHBoxLayout()
+        self.stats_label = QLabel("")
+        self.stats_label.setStyleSheet("font-size: 13px; color: #666;")
+        stats_layout.addWidget(self.stats_label)
+        stats_layout.addStretch()
+        layout.addLayout(stats_layout)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def load_timeline(self):
+        while self.timeline_layout.count():
+            item = self.timeline_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        if self.device_no:
+            events = self.service.get_device_full_timeline(self.device_no)
+        else:
+            events = self.service.get_batch_timeline(self.batch_id)
+
+        type_stats = {}
+        type_colors = {
+            '入库': '#3498db',
+            '出库': '#27ae60',
+            '租借': '#f39c12',
+            '维护': '#e74c3c'
+        }
+
+        if not events:
+            label = QLabel("暂无追踪记录")
+            label.setStyleSheet("color: #999; font-size: 14px;")
+            self.timeline_layout.addWidget(label)
+            return
+
+        first_event = True
+        for event in events:
+            event_type = event['type']
+            type_stats[event_type] = type_stats.get(event_type, 0) + 1
+
+            row_layout = QHBoxLayout()
+            row_layout.setSpacing(15)
+
+            icon_label = QLabel(event['icon'])
+            icon_label.setStyleSheet("font-size: 24px;")
+            icon_label.setAlignment(Qt.AlignTop)
+            icon_label.setFixedWidth(50)
+            row_layout.addWidget(icon_label)
+
+            line_frame = QFrame()
+            line_frame.setFixedWidth(3)
+            color = type_colors.get(event_type, '#999')
+            line_frame.setStyleSheet(f"background-color: {color}; border-radius: 1px;")
+            line_frame.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+            row_layout.addWidget(line_frame)
+
+            content_frame = QFrame()
+            content_frame.setStyleSheet(f"""
+                QFrame {{
+                    background-color: #f8f9fa;
+                    border-left: 4px solid {color};
+                    border-radius: 6px;
+                    padding: 12px;
+                }}
+            """)
+            content_layout = QVBoxLayout(content_frame)
+            content_layout.setContentsMargins(12, 8, 12, 8)
+
+            title_row = QHBoxLayout()
+            title_font = QFont()
+            title_font.setBold(True)
+            title_font.setPointSize(11)
+            title_label = QLabel(event['title'])
+            title_label.setFont(title_font)
+            title_label.setStyleSheet(f"color: {color};")
+            title_row.addWidget(title_label)
+            title_row.addStretch()
+
+            type_tag = QLabel(f"[{event_type}]")
+            type_tag.setStyleSheet(f"color: white; background-color: {color}; padding: 2px 8px; border-radius: 10px; font-size: 11px;")
+            title_row.addWidget(type_tag)
+            content_layout.addLayout(title_row)
+
+            time_label = QLabel(f"🕐 {event['time']}")
+            time_label.setStyleSheet("color: #888; font-size: 12px;")
+            content_layout.addWidget(time_label)
+
+            desc_label = QLabel(event['description'])
+            desc_label.setWordWrap(True)
+            desc_label.setStyleSheet("color: #333; font-size: 13px; margin-top: 4px;")
+            content_layout.addWidget(desc_label)
+
+            if event.get('device_range'):
+                dev_label = QLabel(f"📦 涉及: {event['device_range']}")
+                dev_label.setStyleSheet("color: #555; font-size: 12px; margin-top: 4px;")
+                content_layout.addWidget(dev_label)
+
+            row_layout.addWidget(content_frame, 1)
+
+            self.timeline_layout.addLayout(row_layout)
+            first_event = False
+
+        self.timeline_layout.addStretch()
+
+        stats_parts = []
+        for t, c in type_stats.items():
+            stats_parts.append(f"{t}: {c}次")
+        self.stats_label.setText(f"共 {len(events)} 条事件 | " + " | ".join(stats_parts))
 
 
 class BatchDialog(QDialog):
@@ -111,6 +253,10 @@ class BatchTab(QWidget):
         self.edit_btn.clicked.connect(self.edit_batch)
         self.view_detail_btn = QPushButton("查看详情")
         self.view_detail_btn.clicked.connect(self.view_detail)
+        self.timeline_btn = QPushButton("🔍 全链路追踪")
+        self.timeline_btn.clicked.connect(self.show_timeline)
+        self.device_timeline_btn = QPushButton("🔍 设备追踪")
+        self.device_timeline_btn.clicked.connect(self.show_device_timeline)
         self.delete_btn = QPushButton("删除批次")
         self.delete_btn.clicked.connect(self.delete_batch)
         self.refresh_btn = QPushButton("刷新")
@@ -119,6 +265,8 @@ class BatchTab(QWidget):
         button_layout.addWidget(self.add_btn)
         button_layout.addWidget(self.edit_btn)
         button_layout.addWidget(self.view_detail_btn)
+        button_layout.addWidget(self.timeline_btn)
+        button_layout.addWidget(self.device_timeline_btn)
         button_layout.addWidget(self.delete_btn)
         button_layout.addStretch()
         button_layout.addWidget(self.refresh_btn)
@@ -327,3 +475,35 @@ class BatchTab(QWidget):
                 QMessageBox.warning(self, "警告", str(e))
             except Exception as e:
                 QMessageBox.critical(self, "错误", f"删除失败: {str(e)}")
+
+    def show_timeline(self):
+        current_row = self.table.currentRow()
+        if current_row < 0:
+            QMessageBox.warning(self, "警告", "请选择要追踪的批次")
+            return
+        batch_id = int(self.table.item(current_row, 0).text())
+        dialog = TimelineDialog(self, batch_id=batch_id, service=self.service)
+        dialog.exec_()
+
+    def show_device_timeline(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("输入设备编号")
+        dialog.setMinimumWidth(380)
+        layout = QFormLayout(dialog)
+
+        device_edit = QLineEdit()
+        device_edit.setPlaceholderText("例如: PB20250620XX0001-0001")
+        layout.addRow("设备编号:", device_edit)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addRow(buttons)
+
+        if dialog.exec_() == QDialog.Accepted:
+            device_no = device_edit.text().strip()
+            if not device_no:
+                QMessageBox.warning(self, "警告", "请输入设备编号")
+                return
+            timeline = TimelineDialog(self, service=self.service, device_no=device_no)
+            timeline.exec_()
