@@ -9,6 +9,7 @@ from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QT
 from PyQt5.QtCore import Qt, QDate
 from services.rental_service import RentalService
 from services.batch_service import BatchService
+from services.dashboard_service import DashboardService
 
 
 class ReturnDialog(QDialog):
@@ -91,6 +92,7 @@ class RentalTab(QWidget):
         self.db = db
         self.rental_service = RentalService(db)
         self.batch_service = BatchService(db)
+        self.dashboard_service = DashboardService(db)
         self.init_ui()
         self.load_data()
 
@@ -239,7 +241,12 @@ class RentalTab(QWidget):
         faulty_layout.addWidget(self.faulty_table)
 
         report_page = QWidget()
-        report_layout = QVBoxLayout(report_page)
+        report_page_layout = QVBoxLayout(report_page)
+
+        report_sub_tab = QTabWidget()
+
+        report_content_page = QWidget()
+        report_layout = QVBoxLayout(report_content_page)
 
         report_filter_layout = QHBoxLayout()
         report_filter_layout.addWidget(QLabel("开始日期:"))
@@ -312,6 +319,78 @@ class RentalTab(QWidget):
         self.location_type_table.setMaximumHeight(150)
         type_layout.addWidget(self.location_type_table)
         report_layout.addWidget(type_group)
+
+        report_sub_tab.addTab(report_content_page, "📊 报表")
+
+        reconciliation_page = QWidget()
+        reconciliation_layout = QVBoxLayout(reconciliation_page)
+
+        reconciliation_btn_layout = QHBoxLayout()
+        self.generate_reconciliation_btn = QPushButton("🔄 生成对账数据")
+        self.generate_reconciliation_btn.clicked.connect(self.generate_reconciliation_data)
+        reconciliation_btn_layout.addWidget(self.generate_reconciliation_btn)
+        reconciliation_btn_layout.addStretch()
+        reconciliation_layout.addLayout(reconciliation_btn_layout)
+
+        self.recon_summary_group = QGroupBox("汇总对比")
+        recon_summary_grid = QVBoxLayout(self.recon_summary_group)
+        recon_header = QHBoxLayout()
+        recon_header.addWidget(QLabel(""))
+        recon_header.addWidget(QLabel("订单数"))
+        recon_header.addWidget(QLabel("营收(元)"))
+        recon_summary_grid.addLayout(recon_header)
+
+        report_row = QHBoxLayout()
+        report_row.addWidget(QLabel("报表口径(含进行中)"))
+        self.recon_report_orders_label = QLabel("0")
+        self.recon_report_orders_label.setStyleSheet("font-weight: bold; color: #2c7be5;")
+        report_row.addWidget(self.recon_report_orders_label)
+        self.recon_report_revenue_label = QLabel("0.00")
+        self.recon_report_revenue_label.setStyleSheet("font-weight: bold; color: #2c7be5;")
+        report_row.addWidget(self.recon_report_revenue_label)
+        recon_summary_grid.addLayout(report_row)
+
+        completed_row = QHBoxLayout()
+        completed_row.addWidget(QLabel("已完成口径"))
+        self.recon_completed_orders_label = QLabel("0")
+        self.recon_completed_orders_label.setStyleSheet("font-weight: bold; color: #27ae60;")
+        completed_row.addWidget(self.recon_completed_orders_label)
+        self.recon_completed_revenue_label = QLabel("0.00")
+        self.recon_completed_revenue_label.setStyleSheet("font-weight: bold; color: #27ae60;")
+        completed_row.addWidget(self.recon_completed_revenue_label)
+        recon_summary_grid.addLayout(completed_row)
+
+        diff_row = QHBoxLayout()
+        diff_row.addWidget(QLabel("差异(进行中订单)"))
+        self.recon_diff_orders_label = QLabel("0")
+        self.recon_diff_orders_label.setStyleSheet("font-weight: bold; color: #e74c3c;")
+        diff_row.addWidget(self.recon_diff_orders_label)
+        self.recon_diff_revenue_label = QLabel("0.00")
+        self.recon_diff_revenue_label.setStyleSheet("font-weight: bold; color: #e74c3c; background-color: #fff3cd; padding: 2px;")
+        diff_row.addWidget(self.recon_diff_revenue_label)
+        recon_summary_grid.addLayout(diff_row)
+
+        reconciliation_layout.addWidget(self.recon_summary_group)
+
+        self.recon_table = QTableWidget()
+        self.recon_table.setColumnCount(7)
+        self.recon_table.setHorizontalHeaderLabels([
+            "网点名称", "报表订单数", "已完成订单数", "订单差异",
+            "报表营收", "已完成营收", "营收差异"
+        ])
+        self.recon_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.recon_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.recon_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.recon_table.doubleClicked.connect(self._recon_table_double_clicked)
+        reconciliation_layout.addWidget(self.recon_table, 1)
+
+        self.recon_conclusion_label = QLabel("")
+        self.recon_conclusion_label.setStyleSheet("font-size: 14px; font-weight: bold; padding: 8px;")
+        reconciliation_layout.addWidget(self.recon_conclusion_label)
+
+        report_sub_tab.addTab(reconciliation_page, "🔍 对账核对")
+
+        report_page_layout.addWidget(report_sub_tab)
 
         self.tab_widget.addTab(orders_page, "租借订单")
         self.tab_widget.addTab(bills_page, "账单管理")
@@ -897,3 +976,137 @@ class RentalTab(QWidget):
                 f"页面显示营收: {page_rev:.2f}元 | 核对: {'✅一致' if abs(total_amount - page_rev) < 0.01 else '⚠️存在差异'}")
         except Exception as e:
             QMessageBox.critical(self, "错误", f"导出失败: {str(e)}")
+
+    def generate_reconciliation_data(self):
+        start_date = self.report_start_date.date().toString("yyyy-MM-dd")
+        end_date = self.report_end_date.date().toString("yyyy-MM-dd")
+
+        try:
+            data = self.dashboard_service.get_reconciliation_data(start_date, end_date)
+
+            page_summary = data.get('page_summary', {})
+            completed_only = data.get('completed_only', {})
+            outlet_details = data.get('outlet_details', [])
+
+            self.recon_report_orders_label.setText(str(page_summary.get('total_orders', 0)))
+            self.recon_report_revenue_label.setText(f"{page_summary.get('total_revenue', 0):.2f}")
+
+            self.recon_completed_orders_label.setText(str(completed_only.get('total_orders', 0)))
+            self.recon_completed_revenue_label.setText(f"{completed_only.get('total_revenue', 0):.2f}")
+
+            diff_orders = page_summary.get('total_orders', 0) - completed_only.get('total_orders', 0)
+            diff_revenue = round(page_summary.get('total_revenue', 0) - completed_only.get('total_revenue', 0), 2)
+            self.recon_diff_orders_label.setText(str(diff_orders))
+            self.recon_diff_revenue_label.setText(f"{diff_revenue:.2f}")
+
+            self.recon_table.setRowCount(len(outlet_details))
+            diff_outlet_count = 0
+            for row, detail in enumerate(outlet_details):
+                self.recon_table.setItem(row, 0, QTableWidgetItem(detail['outlet_name']))
+                self.recon_table.setItem(row, 1, QTableWidgetItem(str(detail['report_orders'])))
+                self.recon_table.setItem(row, 2, QTableWidgetItem(str(detail['completed_orders'])))
+
+                diff_o = detail['diff_orders']
+                diff_o_item = QTableWidgetItem(str(diff_o))
+                if diff_o != 0:
+                    diff_o_item.setForeground(Qt.red)
+                    diff_outlet_count += 1
+                self.recon_table.setItem(row, 3, diff_o_item)
+
+                report_rev_item = QTableWidgetItem(f"{detail['report_revenue']:.2f}")
+                self.recon_table.setItem(row, 4, report_rev_item)
+
+                completed_rev_item = QTableWidgetItem(f"{detail['completed_revenue']:.2f}")
+                self.recon_table.setItem(row, 5, completed_rev_item)
+
+                diff_r = detail['diff_revenue']
+                diff_r_item = QTableWidgetItem(f"{diff_r:.2f}")
+                if abs(diff_r) > 0.01:
+                    diff_r_item.setForeground(Qt.red)
+                self.recon_table.setItem(row, 6, diff_r_item)
+
+            if diff_outlet_count == 0:
+                self.recon_conclusion_label.setText("✅ 数据一致")
+                self.recon_conclusion_label.setStyleSheet("font-size: 14px; font-weight: bold; padding: 8px; color: #27ae60;")
+            else:
+                self.recon_conclusion_label.setText(
+                    f"⚠️ {diff_outlet_count}个网点存在进行中订单，导致差异{diff_revenue:.2f}元"
+                )
+                self.recon_conclusion_label.setStyleSheet("font-size: 14px; font-weight: bold; padding: 8px; color: #e74c3c; background-color: #fff3cd;")
+
+            QMessageBox.information(self, "成功", "对账数据生成完成!")
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"生成对账数据失败: {str(e)}")
+
+    def _recon_table_double_clicked(self, index):
+        row = index.row()
+        outlet_name_item = self.recon_table.item(row, 0)
+        if not outlet_name_item:
+            return
+        outlet_name = outlet_name_item.text()
+
+        start_date = self.report_start_date.date().toString("yyyy-MM-dd")
+        end_date = self.report_end_date.date().toString("yyyy-MM-dd")
+
+        outlets = self.batch_service.get_all_outlets()
+        outlet = next((o for o in outlets if o['name'] == outlet_name), None)
+        if not outlet:
+            QMessageBox.warning(self, "警告", f"未找到网点: {outlet_name}")
+            return
+
+        outlet_id = outlet['id']
+
+        try:
+            orders = self.rental_service.get_outlet_orders_detail(outlet_id, start_date, end_date)
+
+            dialog = QDialog(self)
+            dialog.setWindowTitle(f"网点订单明细 - {outlet_name}")
+            dialog.setMinimumSize(1100, 700)
+            layout = QVBoxLayout(dialog)
+
+            info_layout = QHBoxLayout()
+            info_layout.addWidget(QLabel(f"<b>网点:</b> {outlet_name}"))
+            info_layout.addWidget(QLabel(f"<b>时间范围:</b> {start_date} 至 {end_date}"))
+            info_layout.addWidget(QLabel(f"<b>订单数:</b> {len(orders)}"))
+            total_rev = sum(o['final_amount'] for o in orders if o.get('final_amount'))
+            info_layout.addWidget(QLabel(f"<b>总营收:</b> <span style='color: red;'>{total_rev:.2f}</span> 元"))
+            info_layout.addStretch()
+            layout.addLayout(info_layout)
+
+            table = QTableWidget()
+            table.setColumnCount(9)
+            table.setHorizontalHeaderLabels([
+                "订单号", "设备编号", "规则", "借出时间", "归还时间",
+                "时长(分)", "计算金额", "实付金额", "封顶天数"
+            ])
+            table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+            table.setEditTriggers(QTableWidget.NoEditTriggers)
+            table.setRowCount(len(orders))
+            for r, order in enumerate(orders):
+                table.setItem(r, 0, QTableWidgetItem(order['order_no']))
+                table.setItem(r, 1, QTableWidgetItem(order['device_no']))
+                table.setItem(r, 2, QTableWidgetItem(order.get('rule_name', '-')))
+                table.setItem(r, 3, QTableWidgetItem(order['borrow_time']))
+                table.setItem(r, 4, QTableWidgetItem(order.get('return_time', '-')))
+                table.setItem(r, 5, QTableWidgetItem(str(order.get('duration_minutes') or '-')))
+                if order.get('calculated_amount') is not None:
+                    table.setItem(r, 6, QTableWidgetItem(f"{order['calculated_amount']:.2f}"))
+                else:
+                    table.setItem(r, 6, QTableWidgetItem('-'))
+                final_item = QTableWidgetItem(f"{order['final_amount']:.2f}")
+                final_item.setForeground(Qt.red)
+                table.setItem(r, 7, final_item)
+                if order.get('duration_minutes'):
+                    days = (order['duration_minutes'] - 1) // 1440 + 1
+                    table.setItem(r, 8, QTableWidgetItem(f"{days}天"))
+                else:
+                    table.setItem(r, 8, QTableWidgetItem('-'))
+            layout.addWidget(table, 1)
+
+            buttons = QDialogButtonBox(QDialogButtonBox.Close)
+            buttons.rejected.connect(dialog.reject)
+            layout.addWidget(buttons)
+
+            dialog.exec_()
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"查询失败: {str(e)}")

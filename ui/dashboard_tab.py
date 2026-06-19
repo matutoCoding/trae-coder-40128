@@ -2,14 +2,256 @@ from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QT
                              QPushButton, QDialog, QFormLayout, QLineEdit, QSpinBox,
                              QMessageBox, QHeaderView, QLabel, QGroupBox,
                              QDialogButtonBox, QDateEdit, QComboBox, QFrame,
-                             QGridLayout, QSplitter, QCheckBox, QTabWidget)
-from PyQt5.QtCore import Qt, QDate
-from PyQt5.QtGui import QFont
+                             QGridLayout, QSplitter, QCheckBox, QTabWidget, QDoubleSpinBox)
+from PyQt5.QtCore import Qt, QDate, QRect, QPoint
+from PyQt5.QtGui import QFont, QPainter, QPen, QColor
 from services.dashboard_service import DashboardService
 from services.suggestion_service import SuggestionService
 from services.deployment_plan_service import DeploymentPlanService
 from services.batch_service import BatchService
-from ui.outbound_tab import PlanDialog
+
+
+class TrendChartWidget(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumHeight(280)
+        self._data = []
+        self._keys = []
+        self._labels = []
+        self._colors = []
+
+    def setData(self, data_list, keys, labels=None, colors=None):
+        self._data = data_list
+        self._keys = keys
+        self._labels = labels or keys
+        default_colors = [QColor('#2c7be5'), QColor('#27ae60'), QColor('#f39c12'), QColor('#e74c3c')]
+        self._colors = colors or default_colors[:len(keys)]
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        w = self.width()
+        h = self.height()
+        margin_left = 70
+        margin_right = 30
+        margin_top = 30
+        margin_bottom = 60
+        chart_w = w - margin_left - margin_right
+        chart_h = h - margin_top - margin_bottom
+
+        painter.fillRect(self.rect(), QColor('#fafafa'))
+        painter.setPen(QPen(QColor('#cccccc'), 1))
+        painter.drawRect(margin_left, margin_top, chart_w, chart_h)
+
+        if not self._data or len(self._data) < 2:
+            painter.setPen(QColor('#999999'))
+            painter.setFont(QFont('Microsoft YaHei', 11))
+            painter.drawText(self.rect(), Qt.AlignCenter, '暂无趋势数据')
+            painter.end()
+            return
+
+        n = len(self._data)
+
+        all_vals = []
+        for key in self._keys:
+            for item in self._data:
+                v = item.get(key, 0) or 0
+                all_vals.append(v)
+
+        if not all_vals:
+            painter.end()
+            return
+
+        y_min = 0
+        y_max = max(all_vals) if all_vals else 1
+        if y_max == y_min:
+            y_max = y_min + 1
+
+        grid_count = 5
+        painter.setPen(QPen(QColor('#e0e0e0'), 1, Qt.DotLine))
+        painter.setFont(QFont('Microsoft YaHei', 8))
+        for i in range(grid_count + 1):
+            y_val = y_min + (y_max - y_min) * i / grid_count
+            y_pos = margin_top + chart_h - int(chart_h * i / grid_count)
+            painter.drawLine(margin_left, y_pos, margin_left + chart_w, y_pos)
+            painter.setPen(QColor('#666666'))
+            if y_max > 100:
+                painter.drawText(QRect(0, y_pos - 10, margin_left - 5, 20), Qt.AlignRight | Qt.AlignVCenter,
+                                 f'{int(y_val)}')
+            else:
+                painter.drawText(QRect(0, y_pos - 10, margin_left - 5, 20), Qt.AlignRight | Qt.AlignVCenter,
+                                 f'{y_val:.1f}')
+            painter.setPen(QPen(QColor('#e0e0e0'), 1, Qt.DotLine))
+
+        step_x = chart_w / max(n - 1, 1)
+        label_step = max(1, n // 10)
+        painter.setPen(QColor('#666666'))
+        for i in range(0, n, label_step):
+            x_pos = margin_left + int(i * step_x)
+            label = self._data[i].get('stat_week', '') or self._data[i].get('stat_date', '')
+            if len(label) > 5:
+                label = label[5:]
+            painter.drawText(QRect(x_pos - 30, margin_top + chart_h + 5, 60, 20),
+                             Qt.AlignCenter, label)
+
+        for key_idx, key in enumerate(self._keys):
+            color = self._colors[key_idx] if key_idx < len(self._colors) else QColor('#333333')
+            painter.setPen(QPen(color, 2))
+            points = []
+            for i, item in enumerate(self._data):
+                v = item.get(key, 0) or 0
+                x = margin_left + int(i * step_x)
+                ratio = (v - y_min) / (y_max - y_min) if y_max != y_min else 0
+                y = margin_top + chart_h - int(chart_h * ratio)
+                points.append(QPoint(x, y))
+            for j in range(len(points) - 1):
+                painter.drawLine(points[j], points[j + 1])
+            painter.setBrush(color)
+            for pt in points:
+                painter.drawEllipse(pt, 3, 3)
+            painter.setBrush(Qt.NoBrush)
+
+        legend_y = h - 18
+        legend_x = margin_left
+        for key_idx, label in enumerate(self._labels):
+            color = self._colors[key_idx] if key_idx < len(self._colors) else QColor('#333333')
+            painter.setPen(QPen(color, 2))
+            painter.drawLine(legend_x, legend_y, legend_x + 20, legend_y)
+            painter.setPen(QColor('#333333'))
+            painter.setFont(QFont('Microsoft YaHei', 9))
+            painter.drawText(legend_x + 24, legend_y + 5, label)
+            legend_x += len(label) * 9 + 44
+
+        painter.end()
+
+
+class PlanDraftDialog(QDialog):
+    def __init__(self, parent=None, draft=None, plan_service=None):
+        super().__init__(parent)
+        self.setWindowTitle("调度计划草稿")
+        self.setMinimumSize(800, 600)
+        self.draft = draft or {}
+        self.plan_service = plan_service
+        self.outlet_spinboxes = []
+
+        layout = QVBoxLayout(self)
+
+        form_layout = QFormLayout()
+        self.name_edit = QLineEdit()
+        self.name_edit.setText(self.draft.get('plan_name', ''))
+        form_layout.addRow("计划名称:", self.name_edit)
+
+        summary_parts = []
+        rc = self.draft.get('restock_count', 0)
+        rec = self.draft.get('recovery_count', 0)
+        repc = self.draft.get('replace_count', 0)
+        if rc:
+            summary_parts.append(f"补货{rc}台")
+        if rec:
+            summary_parts.append(f"回收{rec}台")
+        if repc:
+            summary_parts.append(f"替换{repc}台")
+        summary_label = QLabel(" / ".join(summary_parts) if summary_parts else "无")
+        summary_label.setStyleSheet("font-weight: bold; color: #2c7be5;")
+        form_layout.addRow("任务汇总:", summary_label)
+        layout.addLayout(form_layout)
+
+        self.draft_table = QTableWidget()
+        self.draft_table.setColumnCount(5)
+        self.draft_table.setHorizontalHeaderLabels([
+            "网点名称", "类型", "任务类型", "建议数量", "原因"
+        ])
+        self.draft_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        layout.addWidget(self.draft_table, 1)
+
+        outlets = self.draft.get('outlet_targets', [])
+        task_type_labels = {'restock': '补货', 'recovery': '回收', 'replace': '替换'}
+        self.draft_table.setRowCount(len(outlets))
+        for row, target in enumerate(outlets):
+            if len(target) >= 6:
+                outlet_id, qty, task_type, outlet_name, loc_type, reason = target[:6]
+            elif len(target) >= 3:
+                outlet_id, qty, task_type = target[:3]
+                outlet_name = ''
+                loc_type = ''
+                reason = ''
+            else:
+                continue
+
+            self.draft_table.setItem(row, 0, QTableWidgetItem(outlet_name))
+            self.draft_table.setItem(row, 1, QTableWidgetItem(loc_type))
+            task_label = task_type_labels.get(task_type, task_type)
+            task_item = QTableWidgetItem(task_label)
+            if task_type == 'restock':
+                task_item.setForeground(Qt.darkGreen)
+            elif task_type == 'recovery':
+                task_item.setForeground(Qt.gray)
+            elif task_type == 'replace':
+                task_item.setForeground(Qt.red)
+            self.draft_table.setItem(row, 2, task_item)
+
+            spin = QSpinBox()
+            spin.setRange(0, 9999)
+            spin.setValue(qty)
+            self.draft_table.setCellWidget(row, 3, spin)
+            self.outlet_spinboxes.append((row, outlet_id, task_type, spin))
+
+            self.draft_table.setItem(row, 4, QTableWidgetItem(reason))
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("确认创建计划")
+        buttons.button(QDialogButtonBox.Cancel).setText("取消")
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _on_accept(self):
+        plan_name = self.name_edit.text().strip()
+        if not plan_name:
+            QMessageBox.warning(self, "提示", "请输入计划名称")
+            return
+
+        outlet_targets = []
+        recovery_infos = []
+        for row, outlet_id, task_type, spin in self.outlet_spinboxes:
+            qty = spin.value()
+            if qty <= 0:
+                continue
+            if task_type in ('restock', 'replace'):
+                outlet_targets.append((outlet_id, qty))
+            elif task_type == 'recovery':
+                recovery_infos.append((outlet_id, qty))
+
+        remark_parts = []
+        if recovery_infos:
+            recovery_desc = ", ".join([f"网点{oid}回收{q}台" for oid, q in recovery_infos])
+            remark_parts.append(f"回收任务: {recovery_desc}")
+        remark = self.draft.get('remark', '')
+        if remark_parts:
+            remark = (remark + " | " if remark else "") + "; ".join(remark_parts)
+
+        if not outlet_targets and not recovery_infos:
+            QMessageBox.warning(self, "提示", "没有有效的调度数量")
+            return
+
+        try:
+            plan_id = self.plan_service.create_plan(
+                plan_name=plan_name,
+                location_type=self.draft.get('location_type', '混合类型'),
+                target_quantity=self.draft.get('target_quantity', 0),
+                outlet_targets=outlet_targets,
+                priority=self.draft.get('priority', 'high'),
+                plan_date=self.draft.get('plan_date'),
+                operator=self.draft.get('operator'),
+                remark=remark
+            )
+            QMessageBox.information(self, "成功",
+                                    f"调度计划创建成功!\n计划ID: {plan_id}\n建议前往【拆分出库】->【投放计划】页执行出库")
+            self.accept()
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"创建失败: {str(e)}")
 
 
 class OutletDetailDialog(QDialog):
@@ -55,6 +297,73 @@ class OutletDetailDialog(QDialog):
         self.order_table.setEditTriggers(QTableWidget.NoEditTriggers)
         order_layout.addWidget(self.order_table)
         tabs.addTab(order_tab, "📒 订单明细")
+
+        trend_tab = QWidget()
+        trend_layout = QVBoxLayout(trend_tab)
+
+        trend_data = self.dashboard_service.get_trend_data(
+            start_date=self.start_date, end_date=self.end_date,
+            outlet_id=self.outlet_id
+        )
+
+        self.trend_table = QTableWidget()
+        self.trend_table.setColumnCount(5)
+        self.trend_table.setHorizontalHeaderLabels([
+            "日期", "订单数", "营收", "使用中设备", "故障数"
+        ])
+        self.trend_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.trend_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.trend_table.setRowCount(len(trend_data))
+        for row, d in enumerate(trend_data):
+            label = d.get('stat_week', '') or d.get('stat_date', '')
+            self.trend_table.setItem(row, 0, QTableWidgetItem(label))
+            self.trend_table.setItem(row, 1, QTableWidgetItem(str(d.get('orders', 0))))
+            self.trend_table.setItem(row, 2, QTableWidgetItem(f"{d.get('revenue', 0):.2f}"))
+            self.trend_table.setItem(row, 3, QTableWidgetItem(str(d.get('in_use_devices', 0))))
+            self.trend_table.setItem(row, 4, QTableWidgetItem(str(d.get('faulty_devices', 0))))
+        trend_layout.addWidget(self.trend_table)
+
+        self.trend_chart = TrendChartWidget()
+        self.trend_chart.setData(
+            trend_data,
+            keys=['orders', 'revenue', 'in_use_devices', 'faulty_devices'],
+            labels=['订单数', '营收', '使用中', '故障'],
+            colors=[QColor('#2c7be5'), QColor('#27ae60'), QColor('#f39c12'), QColor('#e74c3c')]
+        )
+        trend_layout.addWidget(self.trend_chart, 1)
+        tabs.addTab(trend_tab, "📈 趋势与周转")
+
+        turnover = self.dashboard_service.get_outlet_turnover(
+            self.outlet_id, self.start_date, self.end_date
+        )
+        turnover_group = QGroupBox("周转率")
+        turnover_layout = QGridLayout(turnover_group)
+        turnover_defs = [
+            ('total_devices', '设备总数', '#2c7be5'),
+            ('total_borrows', '借出次数', '#27ae60'),
+            ('total_returns', '归还次数', '#8e44ad'),
+            ('avg_borrow_duration', '平均借出时长(分)', '#f39c12'),
+            ('turnover_rate', '周转率', '#e74c3c'),
+        ]
+        for idx, (key, name, color) in enumerate(turnover_defs):
+            r, c = divmod(idx, 3)
+            card = QFrame()
+            card.setStyleSheet(f"QFrame {{ border: 1px solid #ddd; border-radius: 6px; background: white; }}")
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(10, 6, 10, 6)
+            title_lbl = QLabel(name)
+            title_lbl.setStyleSheet("color: #666; font-size: 11px;")
+            val = turnover.get(key, 0) or 0
+            if isinstance(val, float):
+                val_text = f"{val:.2f}"
+            else:
+                val_text = str(val)
+            value_lbl = QLabel(val_text)
+            value_lbl.setStyleSheet(f"color: {color}; font-size: 18px; font-weight: bold;")
+            card_layout.addWidget(title_lbl)
+            card_layout.addWidget(value_lbl)
+            turnover_layout.addWidget(card, r, c)
+        trend_layout.addWidget(turnover_group)
 
         layout.addWidget(tabs, 1)
 
@@ -109,6 +418,7 @@ class DashboardTab(QWidget):
         self.suggestion_service = SuggestionService(db)
         self.plan_service = DeploymentPlanService(db)
         self.batch_service = BatchService(db)
+        self._workbench_rows = []
         self.init_ui()
         self.load_data()
 
@@ -135,6 +445,7 @@ class DashboardTab(QWidget):
         filter_layout.addWidget(QLabel("网点类型:"))
         self.location_type_combo = QComboBox()
         self.location_type_combo.addItem("全部", None)
+        self.location_type_combo.currentIndexChanged.connect(self._on_location_type_changed)
         filter_layout.addWidget(self.location_type_combo)
 
         filter_layout.addWidget(QLabel("网点:"))
@@ -155,6 +466,13 @@ class DashboardTab(QWidget):
 
         self.content_tabs = QTabWidget()
 
+        self._init_dashboard_tab()
+        self._init_trend_tab()
+        self._init_workbench_tab()
+
+        main_layout.addWidget(self.content_tabs, 1)
+
+    def _init_dashboard_tab(self):
         dashboard_page = QWidget()
         dashboard_layout = QVBoxLayout(dashboard_page)
 
@@ -206,34 +524,102 @@ class DashboardTab(QWidget):
 
         self.content_tabs.addTab(dashboard_page, "📊 运营看板")
 
-        suggestion_page = QWidget()
-        suggestion_layout = QVBoxLayout(suggestion_page)
+    def _init_trend_tab(self):
+        trend_page = QWidget()
+        trend_layout = QVBoxLayout(trend_page)
 
-        sug_btn_layout = QHBoxLayout()
-        self.refresh_sug_btn = QPushButton("🔄 刷新建议")
-        self.refresh_sug_btn.clicked.connect(self.load_suggestions)
-        sug_btn_layout.addWidget(self.refresh_sug_btn)
+        ctrl_layout = QHBoxLayout()
+        ctrl_layout.addWidget(QLabel("粒度:"))
+        self.granularity_combo = QComboBox()
+        self.granularity_combo.addItem("按日", "daily")
+        self.granularity_combo.addItem("按周", "weekly")
+        self.granularity_combo.currentIndexChanged.connect(self._load_trend_data)
+        ctrl_layout.addWidget(self.granularity_combo)
+        ctrl_layout.addStretch()
+        trend_layout.addLayout(ctrl_layout)
 
-        self.gen_plan_btn = QPushButton("📋 按选中建议生成投放计划")
-        self.gen_plan_btn.clicked.connect(self.generate_plan_from_suggestions)
-        sug_btn_layout.addWidget(self.gen_plan_btn)
-        sug_btn_layout.addStretch()
-        suggestion_layout.addLayout(sug_btn_layout)
+        splitter = QSplitter(Qt.Vertical)
 
-        self.suggestion_table = QTableWidget()
-        self.suggestion_table.setColumnCount(9)
-        self.suggestion_table.setHorizontalHeaderLabels([
-            "选择", "建议类型", "网点名称", "类型", "当前设备", "订单数",
-            "建议数量", "营收(元)", "原因说明"
+        self.trend_table = QTableWidget()
+        self.trend_table.setColumnCount(5)
+        self.trend_table.setHorizontalHeaderLabels([
+            "日期/周", "订单数", "营收", "使用中设备", "故障数"
         ])
-        self.suggestion_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.suggestion_table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.suggestion_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        suggestion_layout.addWidget(self.suggestion_table, 1)
+        self.trend_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.trend_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        splitter.addWidget(self.trend_table)
 
-        self.content_tabs.addTab(suggestion_page, "💡 补货回收建议")
+        self.trend_chart = TrendChartWidget()
+        splitter.addWidget(self.trend_chart)
 
-        main_layout.addWidget(self.content_tabs, 1)
+        splitter.setSizes([300, 300])
+        trend_layout.addWidget(splitter, 1)
+
+        self.content_tabs.addTab(trend_page, "📈 趋势分析")
+
+    def _init_workbench_tab(self):
+        wb_page = QWidget()
+        wb_layout = QVBoxLayout(wb_page)
+
+        filter_row = QHBoxLayout()
+        self.chk_restock = QCheckBox("☑补货建议")
+        self.chk_restock.setChecked(True)
+        self.chk_restock.stateChanged.connect(self._filter_workbench)
+        filter_row.addWidget(self.chk_restock)
+
+        self.chk_recovery = QCheckBox("☑回收建议")
+        self.chk_recovery.setChecked(True)
+        self.chk_recovery.stateChanged.connect(self._filter_workbench)
+        filter_row.addWidget(self.chk_recovery)
+
+        self.chk_replace = QCheckBox("☑故障替换建议")
+        self.chk_replace.setChecked(True)
+        self.chk_replace.stateChanged.connect(self._filter_workbench)
+        filter_row.addWidget(self.chk_replace)
+
+        filter_row.addStretch()
+
+        self.refresh_wb_btn = QPushButton("🔄 刷新建议")
+        self.refresh_wb_btn.clicked.connect(self.load_workbench)
+        filter_row.addWidget(self.refresh_wb_btn)
+        wb_layout.addLayout(filter_row)
+
+        self.workbench_table = QTableWidget()
+        self.workbench_table.setColumnCount(8)
+        self.workbench_table.setHorizontalHeaderLabels([
+            "选择", "建议类型", "网点名称", "类型", "当前设备", "建议数量", "营收(元)", "原因"
+        ])
+        self.workbench_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.workbench_table.setSelectionBehavior(QTableWidget.SelectRows)
+        wb_layout.addWidget(self.workbench_table, 1)
+
+        bottom_row = QHBoxLayout()
+        self.wb_summary_label = QLabel("已选0条，补货0台/回收0台/替换0台")
+        self.wb_summary_label.setStyleSheet("font-weight: bold; color: #2c7be5; font-size: 13px;")
+        bottom_row.addWidget(self.wb_summary_label)
+        bottom_row.addStretch()
+
+        self.gen_draft_btn = QPushButton("📋 生成调度计划草稿")
+        self.gen_draft_btn.clicked.connect(self._generate_draft)
+        bottom_row.addWidget(self.gen_draft_btn)
+        wb_layout.addLayout(bottom_row)
+
+        self.content_tabs.addTab(wb_page, "🛠️ 调度工作台")
+
+    def _on_location_type_changed(self):
+        outlets = self.service.get_all_outlets(self.location_type_combo.currentData())
+        cur_outlet = self.outlet_combo.currentData()
+        self.outlet_combo.blockSignals(True)
+        self.outlet_combo.clear()
+        self.outlet_combo.addItem("全部", None)
+        for o in outlets:
+            self.outlet_combo.addItem(o['name'], o['id'])
+        if cur_outlet is not None:
+            idx = self.outlet_combo.findData(cur_outlet)
+            if idx >= 0:
+                self.outlet_combo.setCurrentIndex(idx)
+        self.outlet_combo.blockSignals(False)
+        self._load_trend_data()
 
     def load_data(self):
         location_types = self.service.get_location_types()
@@ -300,38 +686,154 @@ class DashboardTab(QWidget):
             self.outlet_table.setItem(row, 9, QTableWidgetItem(f"{avg_dur:.0f}"))
             self.outlet_table.setItem(row, 10, QTableWidgetItem(s.get('address') or '-'))
 
-        self.load_suggestions()
+        self._load_trend_data()
+        self.load_workbench()
 
-    def load_suggestions(self):
+    def _load_trend_data(self):
+        start_date = self.start_date_edit.date().toString("yyyy-MM-dd")
+        end_date = self.end_date_edit.date().toString("yyyy-MM-dd")
+        location_type = self.location_type_combo.currentData()
+        outlet_id = self.outlet_combo.currentData()
+        granularity = self.granularity_combo.currentData() or 'daily'
+
+        trend_data = self.service.get_trend_data(
+            start_date=start_date, end_date=end_date,
+            location_type=location_type, outlet_id=outlet_id,
+            granularity=granularity
+        )
+
+        self.trend_table.setRowCount(len(trend_data))
+        for row, d in enumerate(trend_data):
+            label = d.get('stat_week', '') or d.get('stat_date', '')
+            self.trend_table.setItem(row, 0, QTableWidgetItem(label))
+            self.trend_table.setItem(row, 1, QTableWidgetItem(str(d.get('orders', 0))))
+            self.trend_table.setItem(row, 2, QTableWidgetItem(f"{d.get('revenue', 0):.2f}"))
+            self.trend_table.setItem(row, 3, QTableWidgetItem(str(d.get('in_use_devices', 0))))
+            self.trend_table.setItem(row, 4, QTableWidgetItem(str(d.get('faulty_devices', 0))))
+
+        self.trend_chart.setData(
+            trend_data,
+            keys=['orders', 'revenue', 'in_use_devices', 'faulty_devices'],
+            labels=['订单数(蓝)', '营收(绿)', '使用中(橙)', '故障(红)'],
+            colors=[QColor('#2c7be5'), QColor('#27ae60'), QColor('#f39c12'), QColor('#e74c3c')]
+        )
+
+    def load_workbench(self):
         all_sugs = self.suggestion_service.get_all_suggestions()
         flat = []
         for key in ['low_stock', 'idle', 'high_fault']:
             flat.extend(all_sugs.get(key, []))
+        self._workbench_rows = flat
+        self._filter_workbench()
 
-        self.suggestion_table.setRowCount(len(flat))
-        self._suggestion_rows = flat
-        for row, s in enumerate(flat):
+    def _filter_workbench(self):
+        show_restock = self.chk_restock.isChecked()
+        show_recovery = self.chk_recovery.isChecked()
+        show_replace = self.chk_replace.isChecked()
+
+        type_filter = {
+            'low_stock_high_demand': show_restock,
+            'idle': show_recovery,
+            'high_fault': show_replace,
+        }
+
+        filtered = [s for s in self._workbench_rows if type_filter.get(s.get('suggestion_type'), True)]
+
+        type_labels = {
+            'low_stock_high_demand': '⚠️ 补货建议',
+            'idle': '📉 回收建议',
+            'high_fault': '🚨 故障替换建议',
+        }
+        type_colors = {
+            'low_stock_high_demand': Qt.darkGreen,
+            'idle': Qt.gray,
+            'high_fault': Qt.red,
+        }
+
+        self.workbench_table.setRowCount(len(filtered))
+        self._workbench_spins = []
+        for row, s in enumerate(filtered):
             chk = QTableWidgetItem()
             chk.setFlags(chk.flags() | Qt.ItemIsUserCheckable)
             chk.setCheckState(Qt.Checked)
-            self.suggestion_table.setItem(row, 0, chk)
-            type_item = QTableWidgetItem(s.get('type_label', ''))
-            type_map = {
-                '⚠️ 低库存高需求': Qt.darkYellow,
-                '📉 设备闲置': Qt.gray,
-                '🚨 故障占比高': Qt.red
-            }
-            type_item.setForeground(type_map.get(s.get('type_label', ''), Qt.black))
-            self.suggestion_table.setItem(row, 1, type_item)
-            self.suggestion_table.setItem(row, 2, QTableWidgetItem(s.get('outlet_name', '')))
-            self.suggestion_table.setItem(row, 3, QTableWidgetItem(s.get('location_type') or '-'))
-            self.suggestion_table.setItem(row, 4, QTableWidgetItem(str(s.get('current_devices', 0) or 0)))
-            self.suggestion_table.setItem(row, 5, QTableWidgetItem(str(s.get('order_count', 0) or 0)))
-            qty_item = QTableWidgetItem(str(s.get('suggested_quantity', 0)))
-            qty_item.setForeground(Qt.blue)
-            self.suggestion_table.setItem(row, 6, qty_item)
-            self.suggestion_table.setItem(row, 7, QTableWidgetItem(f"{s.get('total_revenue', 0):.2f}"))
-            self.suggestion_table.setItem(row, 8, QTableWidgetItem(s.get('reason', '')))
+            self.workbench_table.setItem(row, 0, chk)
+
+            tl = type_labels.get(s.get('suggestion_type', ''), s.get('type_label', ''))
+            type_item = QTableWidgetItem(tl)
+            type_item.setForeground(type_colors.get(s.get('suggestion_type', ''), Qt.black))
+            self.workbench_table.setItem(row, 1, type_item)
+
+            self.workbench_table.setItem(row, 2, QTableWidgetItem(s.get('outlet_name', '')))
+            self.workbench_table.setItem(row, 3, QTableWidgetItem(s.get('location_type') or '-'))
+            self.workbench_table.setItem(row, 4, QTableWidgetItem(str(s.get('current_devices', 0) or 0)))
+
+            spin = QSpinBox()
+            spin.setRange(0, 9999)
+            spin.setValue(s.get('suggested_quantity', 0) or 0)
+            self.workbench_table.setCellWidget(row, 5, spin)
+            self._workbench_spins.append((row, s, spin))
+
+            self.workbench_table.setItem(row, 6, QTableWidgetItem(f"{s.get('total_revenue', 0):.2f}"))
+            self.workbench_table.setItem(row, 7, QTableWidgetItem(s.get('reason', '')))
+
+        self._update_wb_summary()
+
+    def _update_wb_summary(self):
+        selected_count = 0
+        restock_total = 0
+        recovery_total = 0
+        replace_total = 0
+
+        type_map = {
+            'low_stock_high_demand': 'restock',
+            'idle': 'recovery',
+            'high_fault': 'replace',
+        }
+
+        for row, s, spin in self._workbench_spins:
+            chk = self.workbench_table.item(row, 0)
+            if chk and chk.checkState() == Qt.Checked:
+                selected_count += 1
+                qty = spin.value()
+                task_type = type_map.get(s.get('suggestion_type', ''), '')
+                if task_type == 'restock':
+                    restock_total += qty
+                elif task_type == 'recovery':
+                    recovery_total += qty
+                elif task_type == 'replace':
+                    replace_total += qty
+
+        self.wb_summary_label.setText(
+            f"已选{selected_count}条，补货{restock_total}台/回收{recovery_total}台/替换{replace_total}台"
+        )
+
+    def _generate_draft(self):
+        selected = []
+        type_map = {
+            'low_stock_high_demand': 'restock',
+            'idle': 'recovery',
+            'high_fault': 'replace',
+        }
+
+        for row, s, spin in self._workbench_spins:
+            chk = self.workbench_table.item(row, 0)
+            if chk and chk.checkState() == Qt.Checked:
+                s_copy = dict(s)
+                s_copy['suggested_quantity'] = spin.value()
+                selected.append(s_copy)
+
+        if not selected:
+            QMessageBox.warning(self, "提示", "请先勾选建议网点")
+            return
+
+        draft = self.suggestion_service.generate_workbench_draft(selected)
+        if not draft:
+            QMessageBox.warning(self, "提示", "选中的建议无法生成调度计划")
+            return
+
+        dlg = PlanDraftDialog(self, draft=draft, plan_service=self.plan_service)
+        dlg.exec_()
+        self._update_wb_summary()
 
     def view_outlet_detail(self):
         current_row = self.outlet_table.currentRow()
@@ -343,54 +845,3 @@ class DashboardTab(QWidget):
         end_date = self.end_date_edit.date().toString("yyyy-MM-dd")
         dlg = OutletDetailDialog(self, outlet_id, outlet_name, self.service, start_date, end_date)
         dlg.exec_()
-
-    def generate_plan_from_suggestions(self):
-        selected = []
-        for row in range(self.suggestion_table.rowCount()):
-            item = self.suggestion_table.item(row, 0)
-            if item and item.checkState() == Qt.Checked:
-                if row < len(self._suggestion_rows):
-                    selected.append(self._suggestion_rows[row])
-
-        if not selected:
-            QMessageBox.warning(self, "提示", "请先勾选建议网点")
-            return
-
-        draft = self.suggestion_service.generate_plan_draft_from_suggestions(selected)
-        if not draft:
-            QMessageBox.warning(self, "提示", "选中的建议无法生成补货计划（闲置建议仅作提示）")
-            return
-
-        outlets = self.batch_service.get_all_outlets()
-        outlets_by_type = {}
-        for o in outlets:
-            lt = o.get('location_type') or '其他'
-            if lt not in outlets_by_type:
-                outlets_by_type[lt] = []
-            outlets_by_type[lt].append(o)
-
-        dlg = PlanDialog(self, outlets_by_type)
-        dlg.setWindowTitle("确认投放计划 (根据建议生成)")
-        dlg.name_edit.setText(draft['plan_name'])
-        idx = dlg.location_type_combo.findData(draft['location_type'])
-        if idx >= 0:
-            dlg.location_type_combo.setCurrentIndex(idx)
-        dlg.target_total_spin.setValue(draft['target_quantity'])
-        dlg.remark_edit.setText(draft.get('remark', '') or f"基于{len(selected)}条运营建议自动生成")
-        dlg.operator_edit.setText(draft.get('operator', '') or '')
-
-        for outlet_id, qty in draft.get('outlet_targets', []):
-            if outlet_id in dlg.outlet_spins:
-                dlg.outlet_spins[outlet_id].setValue(qty)
-            else:
-                for oid, spin in dlg.outlet_spins.items():
-                    pass
-
-        if dlg.exec_() == QDialog.Accepted:
-            data = dlg.get_data()
-            try:
-                plan_id = self.plan_service.create_plan(**data)
-                QMessageBox.information(self, "成功",
-                    f"投放计划创建成功!\n计划ID: {plan_id}\n建议前往【拆分出库】->【投放计划】页执行出库")
-            except Exception as e:
-                QMessageBox.critical(self, "错误", f"创建失败: {str(e)}")

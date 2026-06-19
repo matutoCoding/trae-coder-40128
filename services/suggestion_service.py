@@ -128,43 +128,132 @@ class SuggestionService:
         if not suggestions:
             return None
 
-        outlet_targets = {}
+        TYPE_MAP = {
+            'low_stock_high_demand': 'restock',
+            'idle': 'recovery',
+            'high_fault': 'replace',
+        }
+
+        outlet_targets = []
         location_types = set()
-        total_target = 0
+        task_types = set()
+        restock_count = 0
+        recovery_count = 0
+        replace_count = 0
 
         for s in suggestions:
             outlet_id = s.get('outlet_id')
             if not outlet_id:
                 continue
+            suggestion_type = s.get('suggestion_type')
+            task_type = TYPE_MAP.get(suggestion_type)
+            if not task_type:
+                continue
             qty = s.get('suggested_quantity') or 0
-            if s.get('suggestion_type') == 'low_stock_high_demand':
-                outlet_targets[outlet_id] = outlet_targets.get(outlet_id, 0) + qty
-                total_target += qty
-                if s.get('location_type'):
-                    location_types.add(s['location_type'])
-            elif s.get('suggestion_type') == 'idle':
-                pass
-            elif s.get('suggestion_type') == 'high_fault':
-                outlet_targets[outlet_id] = outlet_targets.get(outlet_id, 0) + qty
-                total_target += qty
-                if s.get('location_type'):
-                    location_types.add(s['location_type'])
+            outlet_targets.append((outlet_id, qty, task_type))
+            task_types.add(task_type)
+            if task_type == 'restock':
+                restock_count += qty
+            elif task_type == 'recovery':
+                recovery_count += qty
+            elif task_type == 'replace':
+                replace_count += qty
+            if s.get('location_type'):
+                location_types.add(s['location_type'])
 
-        if total_target <= 0:
+        if not outlet_targets:
             return None
+
+        net_target = restock_count + replace_count - recovery_count
+        target_quantity = net_target if net_target > 0 else 0
 
         if not plan_name:
             ts = datetime.now().strftime('%m%d')
-            plan_name = f"运营建议补货计划-{ts}"
+            plan_name = f"运营调度计划-{ts}"
 
         return {
             'plan_name': plan_name,
             'location_type': list(location_types)[0] if len(location_types) == 1 else '混合类型',
-            'target_quantity': total_target,
-            'outlet_targets': [(oid, qty) for oid, qty in outlet_targets.items() if qty > 0],
+            'target_quantity': target_quantity,
+            'outlet_targets': outlet_targets,
+            'task_types': sorted(task_types),
+            'restock_count': restock_count,
+            'recovery_count': recovery_count,
+            'replace_count': replace_count,
             'priority': 'high',
             'plan_date': datetime.now().strftime('%Y-%m-%d'),
             'operator': operator,
-            'remark': '由运营建议自动生成，含补货和故障替换',
+            'remark': '由运营建议自动生成，含补货、回收和故障替换',
+            'source_suggestions': suggestions
+        }
+
+    def generate_workbench_draft(self, suggestions, plan_name=None, operator=None):
+        if not suggestions:
+            return None
+
+        TYPE_MAP = {
+            'low_stock_high_demand': 'restock',
+            'idle': 'recovery',
+            'high_fault': 'replace',
+        }
+
+        outlet_targets = []
+        location_types = set()
+        task_types = set()
+        restock_count = 0
+        recovery_count = 0
+        replace_count = 0
+
+        for s in suggestions:
+            outlet_id = s.get('outlet_id')
+            if not outlet_id:
+                continue
+            suggestion_type = s.get('suggestion_type')
+            task_type = TYPE_MAP.get(suggestion_type)
+            if not task_type:
+                continue
+            qty = s.get('suggested_quantity') or 0
+            outlet_name = s.get('outlet_name', '')
+            loc_type = s.get('location_type', '')
+            reason = s.get('reason', '')
+            outlet_targets.append((outlet_id, qty, task_type, outlet_name, loc_type, reason))
+            task_types.add(task_type)
+            if task_type == 'restock':
+                restock_count += qty
+            elif task_type == 'recovery':
+                recovery_count += qty
+            elif task_type == 'replace':
+                replace_count += qty
+            if loc_type:
+                location_types.add(loc_type)
+
+        if not outlet_targets:
+            return None
+
+        net_target = restock_count + replace_count - recovery_count
+        target_quantity = net_target if net_target > 0 else 0
+
+        if not plan_name:
+            ts = datetime.now().strftime('%m%d')
+            plan_name = f"运营调度计划-{ts}"
+
+        return {
+            'plan_name': plan_name,
+            'location_type': list(location_types)[0] if len(location_types) == 1 else '混合类型',
+            'target_quantity': target_quantity,
+            'outlet_targets': outlet_targets,
+            'task_types': sorted(task_types),
+            'restock_count': restock_count,
+            'recovery_count': recovery_count,
+            'replace_count': replace_count,
+            'suggestion_summary': {
+                'restock': restock_count,
+                'recovery': recovery_count,
+                'replace': replace_count,
+            },
+            'priority': 'high',
+            'plan_date': datetime.now().strftime('%Y-%m-%d'),
+            'operator': operator,
+            'remark': '由运营建议自动生成，含补货、回收和故障替换',
             'source_suggestions': suggestions
         }

@@ -89,26 +89,27 @@ class DashboardService:
         return result
 
     def get_outlet_stats(self, start_date=None, end_date=None, location_type=None):
-        outlet_where = "WHERE o.status = 1"
-        order_where = "WHERE 1=1"
-        device_where = "WHERE 1=1"
-        params = []
-
-        if location_type:
-            outlet_where += " AND o.location_type = ?"
-            order_where += " AND o.location_type = ?"
-            device_where += " AND o.location_type = ?"
-            params.append(location_type)
-
-        order_params = list(params)
-        device_params = list(params)
-
+        order_having = ""
+        order_params = []
         if start_date:
-            order_where += " AND DATE(ro.return_time) >= ?"
+            order_having += " AND DATE(ro.return_time) >= ?"
             order_params.append(start_date)
         if end_date:
-            order_where += " AND DATE(ro.return_time) <= ?"
+            order_having += " AND DATE(ro.return_time) <= ?"
             order_params.append(end_date)
+        if location_type:
+            order_having += " AND o2.location_type = ?"
+            order_params.append(location_type)
+
+        order_where = ""
+        if order_having:
+            order_where = "WHERE " + order_having[5:]
+
+        outlet_filter_params = []
+        outlet_filter = "WHERE o.status = 1"
+        if location_type:
+            outlet_filter += " AND o.location_type = ?"
+            outlet_filter_params.append(location_type)
 
         sql = f'''
             SELECT 
@@ -142,13 +143,14 @@ class DashboardService:
                     COALESCE(AVG(CASE WHEN ro.status = 'completed' THEN ro.duration_minutes END), 0) as avg_duration
                 FROM rental_orders ro
                 JOIN outlets o2 ON ro.outlet_id = o2.id
-                {order_where.replace("WHERE 1=1 AND", "WHERE") if order_where != "WHERE 1=1" else ""}
+                {order_where}
                 GROUP BY ro.outlet_id
             ) ord ON ord.outlet_id = o.id
-            {outlet_where.replace("WHERE ", "AND ") if outlet_where != "WHERE o.status = 1" else "WHERE o.status = 1"}
+            {outlet_filter}
             ORDER BY total_revenue DESC
         '''
-        return self.db.query(sql, order_params if order_params else None)
+        all_params = order_params + outlet_filter_params
+        return self.db.query(sql, all_params if all_params else None)
 
     def get_outlet_devices_detail(self, outlet_id):
         return self.db.query('''
@@ -201,3 +203,243 @@ class DashboardService:
             params.append(location_type)
         sql += " ORDER BY name"
         return self.db.query(sql, params if params else None)
+
+    def get_trend_data(self, start_date=None, end_date=None, location_type=None, outlet_id=None, granularity='daily'):
+        order_where = "WHERE ro.status = 'completed'"
+        order_params = []
+        if location_type:
+            order_where += " AND o.location_type = ?"
+            order_params.append(location_type)
+        if outlet_id:
+            order_where += " AND ro.outlet_id = ?"
+            order_params.append(outlet_id)
+        if start_date:
+            order_where += " AND DATE(ro.return_time) >= ?"
+            order_params.append(start_date)
+        if end_date:
+            order_where += " AND DATE(ro.return_time) <= ?"
+            order_params.append(end_date)
+
+        device_where = "WHERE 1=1"
+        device_params = []
+        if location_type:
+            device_where += " AND o.location_type = ?"
+            device_params.append(location_type)
+        if outlet_id:
+            device_where += " AND d.outlet_id = ?"
+            device_params.append(outlet_id)
+
+        if granularity == 'weekly':
+            group_expr = "strftime('%Y-W%W', ro.return_time)"
+            select_expr = f"{group_expr} as stat_week, DATE(MIN(ro.return_time)) as stat_date"
+        else:
+            group_expr = "DATE(ro.return_time)"
+            select_expr = "DATE(ro.return_time) as stat_date"
+
+        order_sql = f'''
+            SELECT {select_expr},
+                   COUNT(*) as orders,
+                   COALESCE(SUM(ro.final_amount), 0) as revenue
+            FROM rental_orders ro
+            JOIN outlets o ON ro.outlet_id = o.id
+            {order_where}
+            GROUP BY {group_expr}
+            ORDER BY stat_date
+        '''
+        order_rows = self.db.query(order_sql, order_params if order_params else None)
+
+        in_use_sql = f'''
+            SELECT DATE(d.updated_at) as stat_date,
+                   COUNT(*) as in_use_devices
+            FROM devices d
+            JOIN outlets o ON d.outlet_id = o.id
+            {device_where}
+              AND d.status = 'in_use'
+            GROUP BY DATE(d.updated_at)
+        '''
+        in_use_rows = self.db.query(in_use_sql, device_params if device_params else None)
+        in_use_map = {r['stat_date']: r['in_use_devices'] for r in in_use_rows}
+
+        faulty_sql = f'''
+            SELECT COUNT(*) as faulty_devices
+            FROM devices d
+            JOIN outlets o ON d.outlet_id = o.id
+            {device_where}
+              AND d.status = 'faulty'
+        '''
+        faulty_row = self.db.query_one(faulty_sql, device_params if device_params else None)
+        current_faulty = faulty_row.get('faulty_devices', 0) if faulty_row else 0
+
+        result = []
+        for row in order_rows:
+            item = {
+                'stat_date': row['stat_date'],
+                'orders': row['orders'],
+                'revenue': row['revenue'],
+                'in_use_devices': in_use_map.get(row['stat_date'], 0),
+                'faulty_devices': current_faulty,
+            }
+            if granularity == 'weekly':
+                item['stat_week'] = row['stat_week']
+            result.append(item)
+        return result
+
+    def get_outlet_turnover(self, outlet_id, start_date=None, end_date=None):
+        borrow_where = "WHERE ro.outlet_id = ?"
+        borrow_params = [outlet_id]
+        if start_date:
+            borrow_where += " AND DATE(ro.borrow_time) >= ?"
+            borrow_params.append(start_date)
+        if end_date:
+            borrow_where += " AND DATE(ro.borrow_time) <= ?"
+            borrow_params.append(end_date)
+
+        total_devices_row = self.db.query_one(
+            "SELECT COUNT(*) as total_devices FROM devices WHERE outlet_id = ?",
+            (outlet_id,)
+        )
+        total_devices = total_devices_row.get('total_devices', 0) if total_devices_row else 0
+
+        borrow_sql = f'''
+            SELECT COUNT(*) as total_borrows
+            FROM rental_orders ro
+            {borrow_where}
+        '''
+        borrow_row = self.db.query_one(borrow_sql, borrow_params)
+        total_borrows = borrow_row.get('total_borrows', 0) if borrow_row else 0
+
+        return_where = borrow_where + " AND ro.status = 'completed'"
+        return_sql = f'''
+            SELECT COUNT(*) as total_returns,
+                   COALESCE(AVG(ro.duration_minutes), 0) as avg_borrow_duration
+            FROM rental_orders ro
+            {return_where}
+        '''
+        return_row = self.db.query_one(return_sql, borrow_params)
+        total_returns = return_row.get('total_returns', 0) if return_row else 0
+        avg_borrow_duration = return_row.get('avg_borrow_duration', 0) if return_row else 0
+
+        turnover_rate = round(total_borrows / total_devices, 2) if total_devices > 0 else 0
+
+        return {
+            'total_devices': total_devices,
+            'total_borrows': total_borrows,
+            'total_returns': total_returns,
+            'avg_borrow_duration': avg_borrow_duration,
+            'turnover_rate': turnover_rate,
+        }
+
+    def get_reconciliation_data(self, start_date=None, end_date=None, location_type=None):
+        report_where = "WHERE o.status = 1"
+        report_params = []
+        if location_type:
+            report_where += " AND o.location_type = ?"
+            report_params.append(location_type)
+
+        date_filter = ""
+        if start_date:
+            date_filter += " AND DATE(ro.return_time) >= ?"
+            report_params.append(start_date)
+        if end_date:
+            date_filter += " AND DATE(ro.return_time) <= ?"
+            report_params.append(end_date)
+
+        completed_params = []
+        completed_date_filter = ""
+        if location_type:
+            completed_date_filter += " AND o.location_type = ?"
+            completed_params.append(location_type)
+        if start_date:
+            completed_date_filter += " AND DATE(ro.return_time) >= ?"
+            completed_params.append(start_date)
+        if end_date:
+            completed_date_filter += " AND DATE(ro.return_time) <= ?"
+            completed_params.append(end_date)
+
+        page_summary_sql = f'''
+            SELECT 
+                COUNT(ro.id) as total_orders,
+                COALESCE(SUM(CASE WHEN ro.status = 'completed' THEN ro.final_amount END), 0) as total_revenue
+            FROM outlets o
+            LEFT JOIN rental_orders ro ON ro.outlet_id = o.id
+                {date_filter}
+            {report_where}
+            HAVING COUNT(ro.id) > 0
+        '''
+        page_summary_rows = self.db.query(page_summary_sql, report_params if report_params else None)
+        page_summary = {
+            'total_orders': sum(r['total_orders'] for r in page_summary_rows),
+            'total_revenue': sum(r['total_revenue'] for r in page_summary_rows),
+        }
+
+        completed_summary_sql = f'''
+            SELECT 
+                COUNT(*) as total_orders,
+                COALESCE(SUM(ro.final_amount), 0) as total_revenue
+            FROM rental_orders ro
+            JOIN outlets o ON ro.outlet_id = o.id
+            WHERE ro.status = 'completed'
+            {completed_date_filter}
+        '''
+        completed_summary = self.db.query_one(completed_summary_sql, completed_params if completed_params else None) or {}
+        completed_only = {
+            'total_orders': completed_summary.get('total_orders', 0) or 0,
+            'total_revenue': completed_summary.get('total_revenue', 0) or 0,
+        }
+
+        outlet_report_params = []
+        outlet_report_where = "WHERE o.status = 1"
+        if location_type:
+            outlet_report_where += " AND o.location_type = ?"
+            outlet_report_params.append(location_type)
+
+        outlet_date_params = []
+        outlet_date_filter = ""
+        if start_date:
+            outlet_date_filter += " AND DATE(ro.return_time) >= ?"
+            outlet_date_params.append(start_date)
+        if end_date:
+            outlet_date_filter += " AND DATE(ro.return_time) <= ?"
+            outlet_date_params.append(end_date)
+
+        outlet_sql = f'''
+            SELECT 
+                o.id as outlet_id,
+                o.name as outlet_name,
+                COUNT(ro.id) as report_orders,
+                COALESCE(SUM(CASE WHEN ro.status = 'completed' THEN ro.final_amount END), 0) as report_revenue,
+                COUNT(CASE WHEN ro.status = 'completed' THEN 1 END) as completed_orders,
+                COALESCE(SUM(CASE WHEN ro.status = 'completed' THEN ro.final_amount END), 0) as completed_revenue
+            FROM outlets o
+            LEFT JOIN rental_orders ro ON ro.outlet_id = o.id
+                {outlet_date_filter}
+            {outlet_report_where}
+            GROUP BY o.id, o.name
+            HAVING COUNT(ro.id) > 0
+            ORDER BY report_revenue DESC
+        '''
+        all_params = outlet_date_params + outlet_report_params
+        outlet_rows = self.db.query(outlet_sql, all_params if all_params else None)
+
+        outlet_details = []
+        for row in outlet_rows:
+            report_orders = row['report_orders'] or 0
+            completed_orders = row['completed_orders'] or 0
+            report_revenue = row['report_revenue'] or 0
+            completed_revenue = row['completed_revenue'] or 0
+            outlet_details.append({
+                'outlet_id': row['outlet_id'],
+                'outlet_name': row['outlet_name'],
+                'report_orders': report_orders,
+                'report_revenue': report_revenue,
+                'completed_orders': completed_orders,
+                'completed_revenue': completed_revenue,
+                'diff_orders': report_orders - completed_orders,
+                'diff_revenue': round(report_revenue - completed_revenue, 2),
+            })
+
+        return {
+            'page_summary': page_summary,
+            'completed_only': completed_only,
+            'outlet_details': outlet_details,
+        }

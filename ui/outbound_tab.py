@@ -24,6 +24,7 @@ class PlanDialog(QDialog):
 
         self.location_type_combo = QComboBox()
         all_types = list(set(self.outlets_by_type.keys()) | {'交通枢纽', '商业综合体', '写字楼', '医疗机构', '教育机构', '其他'})
+        self.location_type_combo.addItem("混合类型(所有网点)", "混合类型")
         for t in sorted(all_types):
             self.location_type_combo.addItem(t, t)
         self.location_type_combo.currentIndexChanged.connect(self.update_outlet_list)
@@ -85,12 +86,22 @@ class PlanDialog(QDialog):
                 item.widget().deleteLater()
 
         location_type = self.location_type_combo.currentData()
-        outlets = self.outlets_by_type.get(location_type, [])
+        if location_type == '混合类型':
+            outlets = []
+            seen = set()
+            for lt, ol in self.outlets_by_type.items():
+                for o in ol:
+                    if o['id'] not in seen:
+                        outlets.append(o)
+                        seen.add(o['id'])
+        else:
+            outlets = self.outlets_by_type.get(location_type, [])
 
         self.outlet_spins = {}
         for outlet in outlets:
             row = QHBoxLayout()
-            label = QLabel(f"{outlet['name']}")
+            type_tag = f"[{outlet.get('location_type', '')}]" if location_type == '混合类型' else ''
+            label = QLabel(f"{outlet['name']} {type_tag}")
             label.setMinimumWidth(200)
             row.addWidget(label)
 

@@ -177,11 +177,15 @@ def test_2_suggestions_and_plan_draft():
         assert draft is not None, "应能生成计划草稿"
         print(f"   草稿: {draft['plan_name']}")
         print(f"   目标: {draft['target_quantity']}台, 覆盖网点: {len(draft['outlet_targets'])}个")
-        for oid, qty in draft['outlet_targets']:
+        for oid, qty, task_type in draft['outlet_targets']:
             oname = next((o['name'] for o in outlets if o['id'] == oid), f"网点{oid}")
-            print(f"     - {oname}: {qty}台")
+            print(f"     - {oname}: {qty}台({task_type})")
 
-        plan_id = plan_svc.create_plan(**{k: v for k, v in draft.items() if k != 'source_suggestions'})
+        plan_data = {k: v for k, v in draft.items() if k not in ('source_suggestions', 'task_types', 'restock_count', 'recovery_count', 'replace_count')}
+        plan_data['outlet_targets'] = [(oid, qty) for oid, qty, task_type in draft['outlet_targets'] if task_type in ('restock', 'replace')]
+        if plan_data['outlet_targets']:
+            plan_data['target_quantity'] = sum(q for _, q in plan_data['outlet_targets'])
+        plan_id = plan_svc.create_plan(**plan_data)
         plan = plan_svc.get_plan_by_id(plan_id)
         assert plan is not None, "计划创建失败"
         print(f"   ✅ 计划创建成功: {plan['plan_no']}, 状态: {plan['status']}")
